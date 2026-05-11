@@ -164,6 +164,33 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 > 수신측 서버를 구성할 때는 [`docs/RECEIVER_TYPE_SPEC.md`](docs/RECEIVER_TYPE_SPEC.md)를 참조하세요.
 > Envelope·DedupEvent·최대 7개 섹션(metrics/processes/network/systemd/static_state/config/hardware) 전체의 상세 타입 정의와 제약 조건이 정리되어 있습니다.
 
+### 세 가지 Envelope 한눈 비교
+
+에이전트가 생성하는 Envelope은 세 종류입니다. **sos = stat + log** 관계입니다.
+
+| 섹션 | 수집 출처 | stat_snapshot | log_batch | sos_snapshot | 전송 방식 |
+|---|---|:---:|:---:|:---:|---|
+| `metrics` | /proc/stat, /proc/meminfo, /proc/diskstats, /proc/loadavg, /proc/pressure/ | ✅ | | ✅ | pull 즉시 / 사고 시 |
+| `processes` | /proc/\<pid\>/ | ✅ | | ✅ | pull 즉시 / 사고 시 |
+| `network` | /proc/net/tcp, /proc/net/sockstat, sysfs | ✅ | | ✅ | pull 즉시 / 사고 시 |
+| `systemd` | systemctl 상태 | ✅ | | ✅ | pull 즉시 / 사고 시 |
+| `static_state` | /proc/cmdline, /proc/sys/\*, /sys/fs/selinux, lsmod, chronyc | ✅ | | ✅ | pull 즉시 / 사고 시 |
+| `config` | /etc/sysctl.conf, /etc/hosts, /etc/hostname, 패키지 목록 | ✅ | | ✅ | pull 즉시 / 사고 시 |
+| `hardware` | /proc/cpuinfo, /proc/meminfo, /sys/block/\*, lspci | ✅ | | ✅ | pull 즉시 / 사고 시 |
+| `logs` | journald, syslog, auth.log, audit.log | | ✅ (30분치) | ✅ (4시간치) | 30분 자동 push / 사고 시 |
+
+> **config vs static_state 구분**: `config`는 설정 파일 원본 내용(`/etc/sysctl.conf`에 뭐라고 써있나), `static_state`는 현재 실제 적용된 런타임 값(`sysctl -a`로 지금 무엇이 동작 중인가). 파일 내용과 런타임 적용값이 다를 수 있으므로 둘 다 필요.
+
+| | stat_snapshot | log_batch | sos_snapshot |
+|---|---|---|---|
+| **트리거** | `GET /stat` (on-demand) | 30분 자동 push | `POST /trigger-sos` (on-demand) |
+| **섹션 수** | 최대 7개 | 1개 (`logs`) | 최대 8개 |
+| **로그 포함** | ❌ | ✅ 30분치 | ✅ 최근 4시간 (최대 500개) |
+| **seq 필드** | 없음 | 있음 (단조 증가) | 없음 |
+| **소요 시간** | ~200ms | 백그라운드 | 수 초~수십 초 |
+
+---
+
 ### Envelope 공통 구조
 
 모든 요청/응답은 동일한 최상위 구조를 가집니다.
