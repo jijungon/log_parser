@@ -1,6 +1,7 @@
 use std::path::Path;
 use tracing::{info, warn};
 
+#[derive(Clone)]
 pub struct Probes {
     pub vector_ok: bool,
     pub journald_ok: bool,

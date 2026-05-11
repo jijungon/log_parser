@@ -1,5 +1,5 @@
 use super::raw_event::RawLogEvent;
-use anyhow::Result;
+use anyhow::{self, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -14,19 +14,32 @@ pub async fn run(
     normal_sock: String,
     tx: mpsc::Sender<RawLogEvent>,
 ) -> Result<()> {
-    // Remove stale socket files
-    let _ = std::fs::remove_file(&critical_sock);
-    let _ = std::fs::remove_file(&normal_sock);
-
-    if let Some(p) = std::path::Path::new(&critical_sock).parent() {
-        std::fs::create_dir_all(p)?;
-    }
+    // 소켓 준비 FS 작업 — spawn_blocking으로 executor 스레드 보호
+    let cs = critical_sock.clone();
+    let ns = normal_sock.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let _ = std::fs::remove_file(&cs);
+        let _ = std::fs::remove_file(&ns);
+        if let Some(p) = std::path::Path::new(&cs).parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("소켓 준비 spawn_blocking 패닉: {e}"))??;
 
     let critical = UnixListener::bind(&critical_sock)?;
     let normal = UnixListener::bind(&normal_sock)?;
 
-    std::fs::set_permissions(&critical_sock, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::set_permissions(&normal_sock, std::fs::Permissions::from_mode(0o600))?;
+    let cs2 = critical_sock.clone();
+    let ns2 = normal_sock.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        std::fs::set_permissions(&cs2, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&ns2, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("소켓 권한 spawn_blocking 패닉: {e}"))??;
 
     info!(critical = %critical_sock, normal = %normal_sock, "Unix socket 바인드 완료");
 

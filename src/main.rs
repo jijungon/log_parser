@@ -63,27 +63,30 @@ async fn main() -> Result<()> {
     let host = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".to_string());
-    // boot_id: prefer system value; fall back to config override for container environments.
-    let boot_id = {
+    // boot_id + host_id: one-time /proc + /etc reads — offload to avoid blocking executor
+    let boot_id_fallback = cfg.cycle.boot_id_fallback.clone();
+    let host_id_override = cfg.cycle.host_id_override.clone();
+    let (boot_id, host_id) = tokio::task::spawn_blocking(move || {
         let sys = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if sys.is_empty() && !cfg.cycle.boot_id_fallback.is_empty() {
-            cfg.cycle.boot_id_fallback.clone()
+            .unwrap_or_default();
+        let sys = sys.trim().to_string();
+        let bid = if sys.is_empty() && !boot_id_fallback.is_empty() {
+            boot_id_fallback
         } else {
             sys
-        }
-    };
-    // host_id: config override takes priority (useful when /etc/machine-id is unreliable).
-    let host_id = if !cfg.cycle.host_id_override.is_empty() {
-        cfg.cycle.host_id_override.clone()
-    } else {
-        std::fs::read_to_string("/etc/machine-id")
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
+        };
+        let hid = if !host_id_override.is_empty() {
+            host_id_override
+        } else {
+            std::fs::read_to_string("/etc/machine-id")
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        (bid, hid)
+    })
+    .await
+    .unwrap_or_else(|_| (String::new(), String::new()));
 
     // ── Shared resources (spool + transport) ──────────────────────────────────
 
@@ -162,8 +165,16 @@ async fn main() -> Result<()> {
 
     let vector_task = if probes.has_log_sources() {
         if !skip_vector_autogen {
-            pipeline::vector_config::write_runtime(&cfg.pipeline, &os, &probes, &runtime_cfg_path)
-                .context("Vector runtime config 생성 실패")?;
+            let pipeline_cfg = cfg.pipeline.clone();
+            let os_clone = os.clone();
+            let probes_clone = probes.clone();
+            let cfg_path = runtime_cfg_path.clone();
+            tokio::task::spawn_blocking(move || {
+                pipeline::vector_config::write_runtime(&pipeline_cfg, &os_clone, &probes_clone, &cfg_path)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("vector config spawn_blocking 패닉: {e}")))
+            .context("Vector runtime config 생성 실패")?;
             info!(path = %runtime_cfg_path, "Vector runtime config 생성 완료");
         }
 
@@ -199,10 +210,15 @@ async fn main() -> Result<()> {
     // Load initial seq from seq_state_path to survive daemon restarts.
     let (initial_seq, seq_state_path) = if cfg.static_state.enabled {
         let path = cfg.static_state.seq_state_path.clone();
-        let seq = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(1);
+        let path2 = path.clone();
+        let seq = tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&path2)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(1)
+        })
+        .await
+        .unwrap_or(1);
         (seq, path)
     } else {
         (1, String::new())

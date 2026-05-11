@@ -44,18 +44,22 @@ fn read_cpu_sample() -> Option<CpuSample> {
 }
 
 pub async fn collect_metrics() -> Value {
-    // Before-samples (all at once)
-    let s1 = read_cpu_sample();
-    let disk1 = read_diskstats();
-    let net1 = read_net_dev();
+    // /proc 읽기 — spawn_blocking으로 executor 스레드 보호
+    let (s1, disk1, net1) = tokio::task::spawn_blocking(|| {
+        (read_cpu_sample(), read_diskstats(), read_net_dev())
+    })
+    .await
+    .unwrap_or((None, Default::default(), Default::default()));
 
     // Single 200ms sleep covers all three delta measurements
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // After-samples
-    let s2 = read_cpu_sample();
-    let disk2 = read_diskstats();
-    let net2 = read_net_dev();
+    let (s2, disk2, net2) = tokio::task::spawn_blocking(|| {
+        (read_cpu_sample(), read_diskstats(), read_net_dev())
+    })
+    .await
+    .unwrap_or((None, Default::default(), Default::default()));
 
     let cpu = if let (Some(a), Some(b)) = (s1, s2) {
         let total_a = a.user + a.nice + a.system + a.idle + a.iowait + a.irq + a.softirq;
@@ -78,12 +82,12 @@ pub async fn collect_metrics() -> Value {
     let disk_io = compute_disk_io(disk1, disk2, 0.2);
     let network = compute_network(net1, net2, 0.2);
 
-    // Memory + load avg (no delta needed)
-    let memory = collect_meminfo_metrics();
-    let load_avg = collect_loadavg();
-
-    // PSI
-    let pressure = collect_psi();
+    // Memory + load avg + PSI — /proc reads, bundle in spawn_blocking
+    let (memory, load_avg, pressure) = tokio::task::spawn_blocking(|| {
+        (collect_meminfo_metrics(), collect_loadavg(), collect_psi())
+    })
+    .await
+    .unwrap_or_else(|_| (json!({}), json!({}), json!({})));
 
     json!({
         "cpu": cpu,
@@ -305,7 +309,7 @@ pub async fn collect_processes() -> Value {
             Err(_) => return json!([]),
         };
 
-        for entry in proc_dir.flatten() {
+        for entry in proc_dir.flatten().take(500) {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             let pid: u32 = match name_str.parse() {
@@ -447,12 +451,12 @@ fn parse_passwd() -> HashMap<u32, String> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn collect_network() -> Value {
-    let connections = collect_connections();
-    let sockstat = collect_sockstat();
-    // sysfs reads per-interface are blocking; offload to avoid executor stall
-    let interfaces = tokio::task::spawn_blocking(collect_interfaces)
-        .await
-        .unwrap_or_else(|_| json!({}));
+    // /proc/net reads + sysfs per-interface — all blocking, bundle in one spawn_blocking
+    let (connections, sockstat, interfaces) = tokio::task::spawn_blocking(|| {
+        (collect_connections(), collect_sockstat(), collect_interfaces())
+    })
+    .await
+    .unwrap_or_else(|_| (json!({}), json!({}), json!({})));
 
     json!({
         "connections": connections,
@@ -598,10 +602,12 @@ pub async fn collect_systemd() -> Value {
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn collect_static_state() -> Value {
-    let selinux = collect_selinux();
-    let sysctl = collect_sysctl();
-    let kernel_modules = collect_kernel_modules();
-    let cmdline = collect_cmdline();
+    // /sys and /proc reads — bundle synchronous helpers in spawn_blocking
+    let (selinux, sysctl, kernel_modules, cmdline) = tokio::task::spawn_blocking(|| {
+        (collect_selinux(), collect_sysctl(), collect_kernel_modules(), collect_cmdline())
+    })
+    .await
+    .unwrap_or_else(|_| (json!({}), json!({}), json!({}), json!({})));
     let ntp = collect_ntp().await;
 
     json!({
@@ -720,25 +726,28 @@ async fn collect_ntp() -> Value {
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn collect_config() -> Value {
-    let config_files = ["/etc/sysctl.conf", "/etc/hosts", "/etc/hostname"];
-    let mut files_obj = serde_json::Map::new();
-    const MAX_FILE_BYTES: usize = 4096;
-
-    for path in &config_files {
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
-                let truncated = if text.len() > MAX_FILE_BYTES {
-                    text[..MAX_FILE_BYTES].to_string()
-                } else {
-                    text
-                };
-                files_obj.insert(path.to_string(), json!(truncated));
-            }
-            Err(_) => {
-                debug!("config file missing: {}", path);
+    // /etc 파일 읽기 — 실제 디스크 파일: spawn_blocking으로 executor 스레드 보호
+    let files_obj = tokio::task::spawn_blocking(|| {
+        let config_files = ["/etc/sysctl.conf", "/etc/hosts", "/etc/hostname"];
+        let mut map = serde_json::Map::new();
+        const MAX_FILE_BYTES: usize = 4096;
+        for path in &config_files {
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    let truncated = if text.len() > MAX_FILE_BYTES {
+                        text[..MAX_FILE_BYTES].to_string()
+                    } else {
+                        text
+                    };
+                    map.insert(path.to_string(), json!(truncated));
+                }
+                Err(_) => {}
             }
         }
-    }
+        map
+    })
+    .await
+    .unwrap_or_default();
 
     let packages = collect_packages().await;
 
@@ -809,9 +818,12 @@ async fn collect_packages() -> Value {
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn collect_hardware() -> Value {
-    let cpu = collect_hw_cpu();
-    let memory = collect_hw_memory();
-    let disks = collect_hw_disks();
+    // /proc/cpuinfo, /proc/meminfo, /sys/block reads — bundle in spawn_blocking
+    let (cpu, memory, disks) = tokio::task::spawn_blocking(|| {
+        (collect_hw_cpu(), collect_hw_memory(), collect_hw_disks())
+    })
+    .await
+    .unwrap_or_else(|_| (json!({}), json!({}), json!([])));
     let pci = collect_pci().await;
 
     json!({

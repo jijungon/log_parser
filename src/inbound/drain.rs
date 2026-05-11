@@ -1,5 +1,6 @@
 use crate::inbound::{check_auth, InboundState};
 use crate::transport;
+use anyhow;
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -168,14 +169,24 @@ pub async fn handle_drain_spool(
             .into_response();
     }
 
-    // 대상 파일 목록
-    let files = st.spool.drain_window(from, to);
+    // 대상 파일 목록 — drain_window는 fs::read_dir, metadata는 fs::metadata: spawn_blocking으로 executor 보호
+    let sp_dw = Arc::clone(&st.spool);
+    let files = tokio::task::spawn_blocking(move || {
+        let files = sp_dw.drain_window(from, to);
+        let bytes: u64 = files
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        (files, bytes)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        warn!("drain_window spawn_blocking 패닉: {e} — 빈 목록으로 처리");
+        (vec![], 0)
+    });
+    let (files, bytes) = files;
     let queued = files.len();
-    let bytes: u64 = files
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len())
-        .sum();
 
     let drain_id = Ulid::new().to_string();
     let now = Utc::now();
@@ -299,7 +310,13 @@ async fn drain_task(st: Arc<InboundState>, files: Vec<std::path::PathBuf>) {
     };
 
     for path in &files {
-        let envelope = match st.spool.load(path) {
+        // spool.load/drain_commit은 std::fs — spawn_blocking으로 executor 스레드 보호
+        let sp_load = Arc::clone(&st.spool);
+        let path_owned = path.clone();
+        let envelope = match tokio::task::spawn_blocking(move || sp_load.load(&path_owned))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("drain load spawn_blocking 패닉: {e}")))
+        {
             Ok(e) => e,
             Err(e) => {
                 warn!(path = %path.display(), err = %e, "drain: envelope 로드 실패 — 스킵");
@@ -311,7 +328,11 @@ async fn drain_task(st: Arc<InboundState>, files: Vec<std::path::PathBuf>) {
 
         match transport.send(&envelope).await {
             Ok(()) => {
-                st.spool.drain_commit(path);
+                let sp_commit = Arc::clone(&st.spool);
+                let path_commit = path.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || sp_commit.drain_commit(&path_commit)).await {
+                    warn!(path = %path.display(), "drain_commit spawn_blocking 패닉: {e}");
+                }
                 st.drain_state.succeeded.fetch_add(1, Ordering::SeqCst);
                 info!(path = %path.display(), "drain: 전송 성공");
             }
@@ -338,6 +359,7 @@ async fn drain_task(st: Arc<InboundState>, files: Vec<std::path::PathBuf>) {
 mod tests {
     use super::*;
     use crate::coordinator::FlushSignal;
+    use crate::envelope::{Cycle, Envelope, Headers};
     use crate::inbound::flush::RateLimiter;
     use crate::transport::spool::Spool;
     use crate::config::TransportConfig;
@@ -397,6 +419,42 @@ mod tests {
         assert_eq!(json["status"], "idle");
         assert!(json["drain_id"].is_null());
         assert_eq!(json["queued"], 0);
+        assert_eq!(json["spool_new_bytes"], 0);
+        assert_eq!(json["spool_retry_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn drain_status_spool_fields_reflect_written_bytes() {
+        let state = make_state();
+        // Write something to spool so spool_new_bytes > 0
+        let dummy = b"{\"test\":1}";
+        state.spool.save_bytes(dummy).unwrap();
+        let resp = app(state)
+            .oneshot(Request::get("/drain-status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["spool_new_bytes"], dummy.len() as u64);
+        assert_eq!(json["spool_retry_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn drain_status_spool_retry_count_reflects_move_to_retry() {
+        let state = make_state();
+        // save a file then move it to retry/ so retry_count becomes 1
+        let path = state.spool.save_bytes(b"{\"test\":1}").unwrap();
+        state.spool.move_to_retry(&path);
+        let resp = app(state)
+            .oneshot(Request::get("/drain-status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["spool_retry_count"], 1u64);
+        assert_eq!(json["spool_new_bytes"], 0u64);
     }
 
     #[tokio::test]
@@ -632,5 +690,128 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "completed", "drain with no files must complete");
         assert!(!state.drain_state.in_progress.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn drain_task_hot_path_send_retry_file_succeeds() {
+        // spin up a local HTTP server that accepts any POST and responds 200
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = Router::new().route("/ingest", post(|| async { StatusCode::OK }));
+        tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let endpoint = format!("http://{addr}/ingest");
+
+        // unique env var — avoid parallel-test collision
+        let token_env = format!(
+            "DRAIN_INTEG_TOKEN_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        std::env::set_var(&token_env, "test-token");
+
+        // spool with a valid envelope file moved to retry/
+        let dir = std::env::temp_dir().join(format!(
+            "drain_integ_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let spool = Arc::new(Spool::new(dir.to_str().unwrap(), 100).unwrap());
+
+        let envelope = Envelope {
+            event_kind: "log_batch".to_string(),
+            cycle: Cycle {
+                host: "h".to_string(),
+                host_id: "hid".to_string(),
+                boot_id: "bid".to_string(),
+                ts: "2026-01-01T00:00:00Z".to_string(),
+                window: None,
+                seq: None,
+            },
+            headers: Headers {
+                total_sections: 0,
+                counts: None,
+                process_health: None,
+                duration_ms: None,
+            },
+            body: vec![],
+        };
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let new_path = spool.save_bytes(&bytes).unwrap();
+        spool.move_to_retry(&new_path);
+        assert_eq!(spool.retry_count(), 1, "pre-condition: 1 file in retry/");
+
+        let transport_cfg = TransportConfig {
+            kind: "http_json".to_string(),
+            endpoint,
+            token_env: token_env.clone(),
+            tls_enabled: false,
+            connect_timeout_seconds: 5,
+            request_timeout_seconds: 5,
+            ..TransportConfig::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel::<FlushSignal>(4);
+        let state = Arc::new(InboundState {
+            flush_tx: tx,
+            flush_token: String::new(),
+            flush_rate: tokio::sync::Mutex::new(RateLimiter::new(100)),
+            flush_in_flight: tokio::sync::Mutex::new(false),
+            response_timeout_secs: 5,
+            serialize_strategy: "reject".to_string(),
+            stat_token: String::new(),
+            sos_token: String::new(),
+            collection_rate: tokio::sync::Mutex::new(RateLimiter::new(600)),
+            envelope_size_limit_bytes: 0,
+            host: "h".to_string(),
+            host_id: "hid".to_string(),
+            boot_id: "bid".to_string(),
+            static_state_enabled: false,
+            log_paths: vec![],
+            drain_state: DrainState::default(),
+            spool: Arc::clone(&spool),
+            transport_cfg,
+        });
+
+        // trigger drain with a window that covers any ULID created in this century
+        let resp = app(Arc::clone(&state))
+            .oneshot(
+                Request::post(
+                    "/drain-spool?from=2000-01-01T00:00:00Z&to=2099-12-31T23:59:59Z",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json["queued"], 1, "1 retry file must be queued");
+
+        // poll until drain_task completes (budget: 2s)
+        for _ in 0..200 {
+            if !state.drain_state.in_progress.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !state.drain_state.in_progress.load(Ordering::SeqCst),
+            "drain_task must complete within 2s"
+        );
+        assert_eq!(
+            state.drain_state.succeeded.load(Ordering::SeqCst),
+            1,
+            "drain_task hot path: load → send → commit must succeed"
+        );
+        assert_eq!(state.drain_state.failed.load(Ordering::SeqCst), 0);
+
+        std::env::remove_var(&token_env);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

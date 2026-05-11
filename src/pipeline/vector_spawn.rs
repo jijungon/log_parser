@@ -81,9 +81,20 @@ impl VectorHandle {
                 "Vector 5초 후 재시작"
             );
             sleep(Duration::from_secs(5)).await;
-            child = self.spawn_once()
-                .await
-                .with_context(|| format!("재시작 #{restarts_in_window} 실패"))?;
+            let mut spawn_attempts = 0u32;
+            child = loop {
+                match self.spawn_once().await {
+                    Ok(c) => break c,
+                    Err(e) => {
+                        spawn_attempts += 1;
+                        if spawn_attempts >= 5 {
+                            anyhow::bail!("Vector spawn 연속 실패 {spawn_attempts}회 — 중단: {e}");
+                        }
+                        error!(restarts_in_window, attempt = spawn_attempts, "Vector 재시작 실패: {e} — 5초 후 재시도");
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            };
         }
     }
 }

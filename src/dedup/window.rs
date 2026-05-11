@@ -43,14 +43,14 @@ impl DedupWindow {
         ts: DateTime<Utc>,
         fields: std::collections::HashMap<String, serde_json::Value>,
     ) -> Option<DedupEvent> {
-        let now = Utc::now();
-
         if let Some(state) = self.cache.get_mut(&fingerprint) {
-            let elapsed = (now - state.ts_last).num_seconds();
+            let elapsed = (ts - state.ts_last).num_seconds();
             if elapsed < self.window_secs {
-                // 윈도우 안: 병합
+                // 윈도우 안: 병합 (순서 역전된 이벤트는 ts_last를 뒤로 당기지 않음)
                 state.count += 1;
-                state.ts_last = ts;
+                if ts > state.ts_last {
+                    state.ts_last = ts;
+                }
                 if state.sample_raws.len() < 3 {
                     state.sample_raws.push(raw);
                 }
@@ -193,6 +193,24 @@ mod tests {
         }
         let events = w.flush_all();
         assert!(events[0].sample_raws.len() <= 3);
+    }
+
+    #[test]
+    fn out_of_order_event_does_not_move_ts_last_backward() {
+        let mut w = DedupWindow::new(30, 100);
+        let now = Utc::now();
+        let past = now - chrono::Duration::seconds(10);
+        // First event: now
+        w.push(1, "journald".to_string(), "info".to_string(), "system.general".to_string(),
+            "tpl".to_string(), "r1".to_string(), now, std::collections::HashMap::new());
+        // Second event: past (out-of-order) — should merge but NOT move ts_last backward
+        w.push(1, "journald".to_string(), "info".to_string(), "system.general".to_string(),
+            "tpl".to_string(), "r2".to_string(), past, std::collections::HashMap::new());
+        let events = w.flush_all();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].count, 2);
+        // ts_last must still be `now`, not rolled back to `past`
+        assert_eq!(events[0].ts_last, now.to_rfc3339());
     }
 }
 

@@ -3,7 +3,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use tracing::{info, warn};
 use ulid::Ulid;
 
@@ -14,8 +15,10 @@ use ulid::Ulid;
 pub struct Spool {
     new_dir: PathBuf,
     retry_dir: PathBuf,
-    pub(crate) max_bytes: u64,      // new/ 용량 상한 (0 = 무제한)
-    pub(crate) used_bytes: AtomicU64, // new/ 현재 사용량
+    pub(crate) max_bytes: u64,         // new/ 용량 상한 (0 = 무제한)
+    pub(crate) used_bytes: AtomicU64,  // new/ 현재 사용량
+    retry_file_count: AtomicUsize,     // retry/ 파일 수 (O(1) 조회, fs::read_dir 불필요)
+    save_lock: Mutex<()>,              // eviction check + write 직렬화
 }
 
 impl Spool {
@@ -28,9 +31,21 @@ impl Spool {
         fs::create_dir_all(&retry_dir)
             .with_context(|| format!("spool retry/ 디렉토리 생성 실패: {}", retry_dir.display()))?;
 
-        let used_bytes = fs::read_dir(&new_dir)
-            .ok()
-            .map(|d| d.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum())
+        // 실패 시 bail — 초기 used_bytes 오류는 무제한 쓰기로 이어지므로 기동 거부
+        let used_bytes: u64 = fs::read_dir(&new_dir)
+            .with_context(|| format!("spool new/ 초기 사용량 계산 실패: {}", new_dir.display()))?
+            .flatten()
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+
+        let initial_retry_count: usize = fs::read_dir(&retry_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .count()
+            })
             .unwrap_or(0);
 
         Ok(Self {
@@ -38,25 +53,60 @@ impl Spool {
             retry_dir,
             max_bytes: max_mb * 1024 * 1024,
             used_bytes: AtomicU64::new(used_bytes),
+            retry_file_count: AtomicUsize::new(initial_retry_count),
+            save_lock: Mutex::new(()),
         })
     }
 
     /// envelope을 new/ WAL에 기록. new/ 용량 초과 시 oldest 파일을 retry/로 evict 후 저장.
+    #[allow(dead_code)]
     pub fn save(&self, envelope: &Envelope) -> Result<PathBuf> {
         let json = serde_json::to_vec(envelope).context("spool 직렬화 실패")?;
+        self.save_bytes(&json)
+    }
+
+    /// 직렬화된 bytes를 new/ WAL에 기록. save()와 동일한 eviction 정책 적용.
+    /// coordinator가 size check를 위해 이미 직렬화한 bytes를 재사용할 수 있도록 제공.
+    pub fn save_bytes(&self, json: &[u8]) -> Result<PathBuf> {
         let json_len = json.len() as u64;
 
+        // Mutex로 eviction check + write 직렬화 — concurrent save() 경쟁 방지
+        let _lock = self.save_lock.lock().expect("spool save lock poisoned");
+
         if self.max_bytes > 0 {
+            // 파일 목록을 한 번만 수집해 루프 내 반복 dir scan O(n²) 방지
+            let candidates = self.list_dir_sorted(&self.new_dir);
+            let mut iter = candidates.iter();
             while self.used_bytes.load(Ordering::SeqCst) + json_len > self.max_bytes {
-                if !self.evict_oldest_to_retry() {
-                    break; // new/ 비었거나 rename 실패 — 용량 초과 허용
+                let oldest = match iter.next() {
+                    Some(p) => p,
+                    None => break, // new/ 비었거나 모두 시도 — 용량 초과 허용
+                };
+                let filename = match oldest.file_name() {
+                    Some(f) => f,
+                    None => continue,
+                };
+                let dest = self.retry_dir.join(filename);
+                let size = fs::metadata(oldest).map(|m| m.len()).unwrap_or(0);
+                match fs::rename(oldest, &dest) {
+                    Ok(()) => {
+                        if size > 0 {
+                            self.used_bytes.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+                                |v| Some(v.saturating_sub(size))).ok();
+                        }
+                        self.retry_file_count.fetch_add(1, Ordering::SeqCst);
+                        warn!(path = %dest.display(), "spool new/ 용량 초과 — oldest 파일 retry/로 evict");
+                    }
+                    Err(e) => {
+                        warn!(src = %oldest.display(), err = %e, "eviction 실패 — 건너뜀");
+                    }
                 }
             }
         }
 
         let id = Ulid::new().to_string();
         let path = self.new_dir.join(format!("{id}.json"));
-        fs::write(&path, &json)
+        fs::write(&path, json)
             .with_context(|| format!("spool 쓰기 실패: {}", path.display()))?;
         self.used_bytes.fetch_add(json_len, Ordering::SeqCst);
         Ok(path)
@@ -94,6 +144,7 @@ impl Spool {
                 if size > 0 {
                     self.used_bytes.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(size))).ok();
                 }
+                self.retry_file_count.fetch_add(1, Ordering::SeqCst);
                 info!(path = %dest.display(), "전송 실패 envelope retry/로 이동");
             }
             Err(e) => warn!(src = %path.display(), dest = %dest.display(), err = %e,
@@ -127,8 +178,12 @@ impl Spool {
 
     /// drain 전송 성공 후 retry/ 파일 삭제
     pub fn drain_commit(&self, path: &Path) {
-        if let Err(e) = fs::remove_file(path) {
-            warn!(path = %path.display(), err = %e, "retry/ drain 파일 삭제 실패");
+        match fs::remove_file(path) {
+            Ok(()) => {
+                self.retry_file_count.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+                    |v| Some(v.saturating_sub(1))).ok();
+            }
+            Err(e) => warn!(path = %path.display(), err = %e, "retry/ drain 파일 삭제 실패"),
         }
     }
 
@@ -165,48 +220,14 @@ impl Spool {
         paths
     }
 
-    /// oldest new/ 파일을 retry/로 이동. 성공 시 true, new/ 비었거나 rename 실패 시 false.
-    fn evict_oldest_to_retry(&self) -> bool {
-        let files = self.list_dir_sorted(&self.new_dir);
-        let oldest = match files.first() {
-            Some(f) => f,
-            None => return false,
-        };
-        let filename = match oldest.file_name() {
-            Some(f) => f,
-            None => return false,
-        };
-        let dest = self.retry_dir.join(filename);
-        let size = fs::metadata(oldest).map(|m| m.len()).unwrap_or(0);
-        match fs::rename(oldest, &dest) {
-            Ok(()) => {
-                if size > 0 {
-                    self.used_bytes.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(size))).ok();
-                }
-                warn!(path = %dest.display(), "spool new/ 용량 초과 — oldest 파일 retry/로 evict");
-                true
-            }
-            Err(e) => {
-                warn!(src = %oldest.display(), err = %e, "eviction 실패 — 용량 초과 상태로 저장 진행");
-                false
-            }
-        }
-    }
-
     /// new/ 현재 사용량 (bytes)
     pub fn new_used_bytes(&self) -> u64 {
         self.used_bytes.load(Ordering::SeqCst)
     }
 
-    /// retry/ 대기 파일 수
+    /// retry/ 대기 파일 수 (O(1) — fs::read_dir 없이 AtomicUsize로 추적)
     pub fn retry_count(&self) -> usize {
-        match fs::read_dir(&self.retry_dir) {
-            Ok(entries) => entries
-                .flatten()
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
-                .count(),
-            Err(_) => 0,
-        }
+        self.retry_file_count.load(Ordering::SeqCst)
     }
 }
 
@@ -282,6 +303,7 @@ mod tests {
             .filter(|e| e.as_ref().ok().map_or(false, |e| e.path().extension().and_then(|x| x.to_str()) == Some("json")))
             .count();
         assert_eq!(retry_count, 1, "file must appear in retry/");
+        assert_eq!(spool.retry_count(), 1, "retry_file_count atomic must reflect move_to_retry");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -291,6 +313,7 @@ mod tests {
         let spool = Spool::new(dir.to_str().unwrap(), 10).unwrap();
         let new_path = spool.save(&test_envelope()).unwrap();
         spool.move_to_retry(&new_path);
+        assert_eq!(spool.retry_count(), 1, "retry_file_count must be 1 after move_to_retry");
 
         let retry_path = fs::read_dir(dir.join("retry")).unwrap()
             .flatten().find(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
@@ -298,6 +321,7 @@ mod tests {
 
         spool.drain_commit(&retry_path);
         assert!(!retry_path.exists(), "drain_commit must delete retry/ file");
+        assert_eq!(spool.retry_count(), 0, "retry_file_count must decrement after drain_commit");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -349,6 +373,7 @@ mod tests {
             .filter(|e| e.as_ref().ok().map_or(false, |e| e.path().extension().and_then(|x| x.to_str()) == Some("json")))
             .count();
         assert_eq!(retry_count, 1, "evicted file must appear in retry/");
+        assert_eq!(spool.retry_count(), 1, "retry_file_count atomic must reflect eviction");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -376,6 +401,32 @@ mod tests {
         // pending/ should only contain new/ files
         assert!(pending.iter().all(|p| p.starts_with(dir.join("new"))));
         drop((p1, p2));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_bytes_writes_raw_bytes() {
+        let dir = tmp_dir("save_bytes");
+        let spool = Spool::new(dir.to_str().unwrap(), 10).unwrap();
+        let json = serde_json::to_vec(&test_envelope()).unwrap();
+        let path = spool.save_bytes(&json).unwrap();
+        assert!(path.exists());
+        let on_disk = fs::read(&path).unwrap();
+        assert_eq!(on_disk, json);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unlimited_spool_never_evicts() {
+        let dir = tmp_dir("unlimited");
+        let spool = Spool::new(dir.to_str().unwrap(), 0).unwrap(); // max_mb=0 → unlimited
+        for _ in 0..5 {
+            spool.save(&test_envelope()).unwrap();
+        }
+        let retry_count = fs::read_dir(dir.join("retry")).unwrap()
+            .filter(|e| e.as_ref().ok().map_or(false, |e| e.path().extension().and_then(|x| x.to_str()) == Some("json")))
+            .count();
+        assert_eq!(retry_count, 0, "unlimited spool must never evict to retry/");
         let _ = fs::remove_dir_all(&dir);
     }
 }

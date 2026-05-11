@@ -49,7 +49,12 @@ pub async fn run_pipeline(
     spool.log_pending();
     let replay_sem = Arc::new(tokio::sync::Semaphore::new(4));
     for path in spool.pending() {
-        let envelope = match spool.load(&path) {
+        let sp_load = Arc::clone(&spool);
+        let path_owned = path.clone();
+        let envelope = match tokio::task::spawn_blocking(move || sp_load.load(&path_owned))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("WAL load spawn_blocking 패닉: {e}")))
+        {
             Ok(e) => e,
             Err(e) => {
                 warn!(path = %path.display(), err = %e, "spool 로드 실패 — 스킵");
@@ -182,25 +187,41 @@ pub async fn run_pipeline(
                     "cycle envelope 조립 → transport 전송");
                 persist_seq(&seq_state_path, next_seq).await;
 
-                // Body size guard — warn operator if envelope exceeds configured limit.
+                // 한 번만 직렬화 — size guard + spool WAL 모두 재사용
+                let json_bytes = serde_json::to_vec(&envelope).ok();
                 if body_max_bytes > 0 {
-                    match serde_json::to_vec(&envelope) {
-                        Ok(v) if v.len() as u64 > body_max_bytes => {
+                    match &json_bytes {
+                        Some(v) if v.len() as u64 > body_max_bytes => {
                             warn!(
                                 json_bytes = v.len(),
                                 limit_bytes = body_max_bytes,
                                 "cycle envelope이 body_max_size_mb 설정 초과"
                             );
                         }
-                        Err(e) => warn!("cycle envelope 직렬화 실패 (size check 불가): {e}"),
+                        None => warn!("cycle envelope 직렬화 실패 (size check 불가)"),
                         _ => {}
                     }
                 }
 
-                // WAL: 전송 전에 spool에 기록
+                // WAL: 전송 전에 spool에 기록 (pre-serialized bytes 재사용으로 이중 직렬화 방지)
+                // spawn_blocking: spool은 std::sync::Mutex + fs::write — async executor 스레드 블로킹 방지
                 let has_critical = envelope_has_critical(&envelope);
                 let max = transport_cfg.retry_max_normal;
-                match spool.save(&envelope) {
+                // bytes_for_spool: json_bytes가 있으면 재사용, 없으면 재직렬화 시도 (실패 시 None)
+                let bytes_for_spool = json_bytes
+                    .as_deref()
+                    .map(|b| b.to_vec())
+                    .or_else(|| serde_json::to_vec(&envelope).ok());
+                let spool_result = match bytes_for_spool {
+                    Some(bytes) => {
+                        let sp_b = Arc::clone(&spool);
+                        tokio::task::spawn_blocking(move || sp_b.save_bytes(&bytes))
+                            .await
+                            .unwrap_or_else(|e| Err(anyhow::anyhow!("spool spawn_blocking 패닉: {e}")))
+                    }
+                    None => Err(anyhow::anyhow!("envelope 직렬화 실패 — spool 저장 불가")),
+                };
+                match spool_result {
                     Ok(path) => {
                         let t2  = Arc::clone(&t);
                         let sp2 = Arc::clone(&spool);
@@ -272,7 +293,9 @@ async fn send_with_backoff(
     loop {
         match t.send(&envelope).await {
             Ok(()) => {
-                spool.commit(&spool_path);
+                let sp = Arc::clone(&spool);
+                let p = spool_path.clone();
+                tokio::task::spawn_blocking(move || sp.commit(&p)).await.ok();
                 if attempt > 0 {
                     info!(attempts = attempt + 1, "재시도 후 전송 성공");
                 } else {
@@ -282,17 +305,28 @@ async fn send_with_backoff(
             }
             Err(TransportError::Fatal(msg)) => {
                 error!("치명 오류 — retry/로 이동: {msg}");
-                spool.move_to_retry(&spool_path);
+                let sp = Arc::clone(&spool);
+                let p = spool_path.clone();
+                tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
                 return;
             }
             Err(TransportError::RateLimited { retry_after }) => {
+                if !has_critical && attempt >= max_retries as u64 {
+                    warn!(attempts = attempt + 1, "rate-limit 한도 소진 — retry/로 이동");
+                    let sp = Arc::clone(&spool);
+                    let p = spool_path.clone();
+                    tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
+                    return;
+                }
                 warn!(attempt, retry_after, "rate-limit — 대기 후 재시도");
                 tokio::time::sleep(Duration::from_secs(retry_after)).await;
             }
             Err(TransportError::Retryable(msg)) => {
                 if !has_critical && attempt >= max_retries as u64 {
                     warn!(attempts = attempt + 1, "재시도 한도 소진 — retry/로 이동: {msg}");
-                    spool.move_to_retry(&spool_path);
+                    let sp = Arc::clone(&spool);
+                    let p = spool_path.clone();
+                    tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
                     return;
                 }
                 warn!(attempt, wait = backoff, "재시도 가능 오류: {msg}");
@@ -433,6 +467,23 @@ mod tests {
             3, true, Arc::clone(&spool), 5, 300, // max_retries=3 but has_critical=true
         ).await;
         assert!(!path.exists(), "critical envelope must eventually succeed");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_non_critical_bails_after_max_retries() {
+        // All responses are 429 — non-critical must move to retry/ after max_retries exhausted
+        let url = start_response_server(vec![429; 10]).await;
+        let spool = make_spool();
+        let path = spool.save(&test_envelope()).unwrap();
+        send_with_backoff(
+            make_transport(&url), test_envelope(), path.clone(),
+            2, false, Arc::clone(&spool), 1, 10, // max_retries=2
+        ).await;
+        assert!(!path.exists(), "new/ file should be moved out after RateLimited exhaustion");
+        let retry_path = path.parent().unwrap().parent().unwrap()
+            .join("retry").join(path.file_name().unwrap());
+        assert!(retry_path.exists(), "file should be in retry/ after RateLimited exhaustion");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 
