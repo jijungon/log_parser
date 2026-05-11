@@ -1,0 +1,68 @@
+# log_parser agent configuration
+# 모든 키에 기본값 — 운영 환경에 맞게 override만 하면 됨 (원칙 #4)
+# 변경 후 agent 재시작 필요
+
+cycle:
+  window_seconds: 1800              # envelope 송출 주기 (default 30분)
+  host_id_override: ""              # /etc/machine-id 부재 시 fallback (비어 있으면 부팅 거부)
+  boot_id_fallback: ""              # /proc/sys/kernel/random/boot_id 부재 시 fallback
+
+cgroup:
+  enabled: true
+  path: "/sys/fs/cgroup/log_parser_agent"
+  memory_max: "128m"                # 실측 평시 RSS ~54MB의 ~2.4배 여유
+  cpu_max: "50000 1000000"          # 5% (50ms / 1000ms period)
+
+pipeline:
+  vector_bin: "/app/vector/bin/vector"
+  vector_config: "/etc/log_parser/vector.toml"
+  # Vector → Rust IPC: Unix domain socket (§7.2.1)
+  # Rust agent가 시작 시 /run/log_parser/ 생성 후 아래 소켓 파일 bind
+  # 소켓 파일 권한 600 (log_parser 프로세스만 접근) — 별도 토큰 인증 불필요
+  vector_critical_sock: "/run/log_parser/events_critical.sock"
+  vector_normal_sock:   "/run/log_parser/events_normal.sock"
+  vector_max_restarts_per_hour: 5
+  channel_capacity: 10000           # 각 내부 채널 버퍼 크기
+  body_max_events_per_cycle: 100000 # envelope.body 폭주 제한 (§7.6.2)
+  body_max_size_mb: 50              # raw JSON 기준. 초과 시 oldest info/warn부터 drop
+
+dedup:
+  window_seconds: 30                # 슬라이딩 윈도우 길이 (Phase B Step 4에서 측정 후 조정)
+  lru_cap: 50000                    # 시그니처 캐시 상한. 초과 시 LRU evict + WARN
+
+transport:
+  kind: "http_json"                 # "http_json" (Phase B) | "otlp" (수신측 확정 후)
+  # OTLP gRPC endpoint (port 4317 표준)
+  # 예: "https://otelcol.example.com:4317"
+  #     "https://otlp.grafana.net:443"      (Grafana Cloud)
+  #     "https://api.datadoghq.com:443"     (Datadog OTLP intake)
+  endpoint: ""                      # 필수
+  token_env: "PUSH_OUTBOUND_TOKEN"  # Bearer / API key (gRPC Authorization metadata)
+  tls_enabled: true                 # false: 개발 환경 전용
+  connect_timeout_seconds: 10
+  request_timeout_seconds: 30
+  retry_max_normal: 5               # critical은 무한 재시도 (원칙 #1)
+  retry_base_seconds: 5
+  retry_max_seconds: 300
+  spool_max_mb: 512
+  spool_dir: "/var/lib/log_parser/spool"
+  # http_json 전용 (kind="http_json" 시에만 사용)
+  http_gzip_level: 6
+
+inbound:
+  listen_addr: "127.0.0.1:9100"    # /flush endpoint. 외부 노출은 reverse proxy 통해서만
+  token_env:      "FLUSH_INBOUND_TOKEN"   # /flush · /drain-spool · /drain-status 인증 토큰
+  stat_token_env: "STAT_INBOUND_TOKEN"    # /stat 인증 토큰
+  sos_token_env:  "SOS_INBOUND_TOKEN"     # /trigger-sos 인증 토큰
+  # ↑ 세 토큰 모두 필수 — 미설정 시 에이전트 기동 거부
+  rate_limit_per_hour: 6
+  body_size_limit_bytes: 1024
+  response_timeout_seconds: 5
+  envelope_size_limit_mb: 10        # JSON 직렬화 기준(gzip 전). 초과 시 413
+  serialize_strategy: "wait"        # "wait" | "reject" — 동시 /flush 처리 정책
+
+static_state:
+  enabled: true
+  scan_interval_seconds: 1800       # 정적 상태 변경 감지 주기
+  storage_path: "/var/lib/log_parser/host_static_state.json"
+  seq_state_path: "/var/lib/log_parser/seq.state"  # cycle.seq 영속화 파일

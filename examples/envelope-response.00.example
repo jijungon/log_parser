@@ -1,0 +1,187 @@
+# Envelope Response 예시
+# 참조: 2_MASTER_PLAN.md §10
+#
+# headers.counts.by_severity  — 수신측이 빠르게 심각도 분포를 파악하는 요약값
+# headers.counts.by_category  — 수신측이 어떤 종류의 이벤트가 발생했는지 분류 파악
+# body[0].data[]              — 실제 정제된 이벤트 목록 (headers는 여기서 집계된 값)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+시나리오: OOM + 디스크 I/O 에러 + SSH 브루트포스가 발생한 30분 cycle
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  "event_kind": "log_batch",
+
+  "cycle": {
+    "host":    "db-prod-03",
+    "host_id": "a8f3c1b9-4d2e-4f1a-b8c3-1234567890ab",
+    "boot_id": "f1a2b3c4-5d6e-7f8a-9b0c-abcdef012345",
+    "ts":      "2026-05-08T10:30:00Z",
+    "window":  "2026-05-08T10:00:00Z/2026-05-08T10:30:00Z",
+    "seq":     42
+  },
+
+  "headers": {
+    "total_sections": 1,
+
+    "counts": {
+      "by_severity": {
+        "critical": 3,
+        "error":    8,
+        "warn":     14,
+        "info":     312
+      },
+      "by_category": {
+        "kernel.oom":           1,
+        "disk.io_error":        1,
+        "auth.bruteforce":      1,
+        "systemd.unit_failure": 1,
+        "fs.error":             2,
+        "net.error":            3
+      }
+    },
+
+    "process_health": {
+      "vector_restarts_24h":    0,
+      "agent_uptime_seconds":   86400
+    }
+  },
+
+  "body": [
+    {
+      "section": "logs",
+      "data": [
+
+        {
+          "source":    "journald.kernel",
+          "severity":  "critical",
+          "category":  "kernel.oom",
+          "fingerprint": "a3f1c9e2b847d056",
+          "template":  "Out of memory: Killed process <NUM> (<WORD>)",
+          "sample_raws": [
+            "Out of memory: Killed process 2481 (java)",
+            "Out of memory: Killed process 3102 (java)"
+          ],
+          "fields":    { "pid": 2481 },
+          "ts_first":  "2026-05-08T10:13:42Z",
+          "ts_last":   "2026-05-08T10:13:58Z",
+          "count":     3
+        },
+
+        {
+          "source":    "journald.kernel",
+          "severity":  "error",
+          "category":  "disk.io_error",
+          "fingerprint": "c04ab8f31e72a190",
+          "template":  "blk_update_request: I/O error, dev <WORD>, sector <NUM>",
+          "sample_raws": [
+            "blk_update_request: I/O error, dev sdb, sector 4096000",
+            "blk_update_request: I/O error, dev sdb, sector 4096512"
+          ],
+          "fields":    { "dev": "sdb" },
+          "ts_first":  "2026-05-08T10:03:00Z",
+          "ts_last":   "2026-05-08T10:03:29Z",
+          "count":     312
+        },
+
+        {
+          "source":    "file.auth",
+          "severity":  "warn",
+          "category":  "auth.bruteforce",
+          "fingerprint": "a3f2b1c9d847e056",
+          "template":  "Failed password for invalid user <WORD> from <IP> port <NUM> ssh2",
+          "sample_raws": [
+            "Failed password for invalid user admin from 203.0.113.42 port 51234 ssh2",
+            "Failed password for invalid user admin from 10.0.0.99 port 44821 ssh2"
+          ],
+          "fields":    { "user": "admin" },
+          "ts_first":  "2026-05-08T10:00:01Z",
+          "ts_last":   "2026-05-08T10:28:44Z",
+          "count":     47
+        },
+
+        {
+          "source":    "journald.systemd",
+          "severity":  "error",
+          "category":  "systemd.unit_failure",
+          "fingerprint": "e55b2c8a1f390d47",
+          "template":  "<WORD>.service: Main process exited, code=exited, status=<NUM>/FAILURE",
+          "sample_raws": [
+            "app-worker.service: Main process exited, code=exited, status=1/FAILURE"
+          ],
+          "fields":    { "unit": "app-worker.service" },
+          "ts_first":  "2026-05-08T10:14:03Z",
+          "ts_last":   "2026-05-08T10:14:03Z",
+          "count":     1
+        },
+
+        {
+          "source":    "journald.kernel",
+          "severity":  "info",
+          "category":  "system.general",
+          "fingerprint": "b72d4a1e9c530f82",
+          "template":  "eth0: renamed from <WORD>",
+          "sample_raws": [
+            "eth0: renamed from veth3a2f1b"
+          ],
+          "fields":    {},
+          "ts_first":  "2026-05-08T10:01:12Z",
+          "ts_last":   "2026-05-08T10:01:12Z",
+          "count":     1
+        }
+
+      ]
+    }
+  ]
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+수신측 독해 순서
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. headers.counts.by_severity 확인
+   → critical: 3 발견 → 즉시 "사고 가능성" 판단
+
+2. headers.counts.by_category 확인
+   → kernel.oom + disk.io_error 조합 → "디스크 문제로 OOM" 가설
+
+3. body[0].data[] 파고들기
+   → kernel.oom count=3, ts: 10:13:42 ~ 10:13:58
+   → disk.io_error count=312 (30초 burst), ts: 10:03:00 ~ 10:03:29
+   → 디스크 에러(10:03) → OOM(10:13) 인과 흐름 확인
+
+4. 상세 수집 트리거 판단 (수신측)
+   → "사고다" → GET /stat + POST /flush + POST /trigger-sos 병렬 호출
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+empty cycle 예시 (이벤트 0건, 호스트 alive 신호)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  "event_kind": "log_batch",
+  "cycle": {
+    "host":    "db-prod-03",
+    "host_id": "a8f3c1b9-4d2e-4f1a-b8c3-1234567890ab",
+    "boot_id": "f1a2b3c4-5d6e-7f8a-9b0c-abcdef012345",
+    "ts":      "2026-05-08T11:00:00Z",
+    "window":  "2026-05-08T10:30:00Z/2026-05-08T11:00:00Z",
+    "seq":     43
+  },
+  "headers": {
+    "total_sections": 1,
+    "counts": {
+      "by_severity": { "critical": 0, "error": 0, "warning": 0, "info": 0 },
+      "by_category": {}
+    },
+    "process_health": {
+      "vector_restarts_24h":  0,
+      "agent_uptime_seconds": 90000
+    }
+  },
+  "body": [
+    { "section": "logs", "data": [] }
+  ]
+}
+
+# envelope 도착 자체가 alive 신호.
+# 수신측은 35분(30분 + grace 5분) 안에 envelope이 안 오면 호스트 이상으로 판단.

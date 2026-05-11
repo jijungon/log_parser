@@ -1,0 +1,37 @@
+{
+  "type": "score",
+  "timestamp": "2026-05-11T00:00:00Z",
+  "round": 1,
+  "rubric": "log-parser-completeness",
+  "judges": 3,
+  "criteria": ["correctness","test-coverage","error-handling","production-readiness","api-completeness"],
+  "scores": {
+    "correctness":        [8, 8, 7],
+    "test-coverage":      [8, 8, 7],
+    "error-handling":     [8, 9, 7],
+    "production-readiness":[7, 8, 7],
+    "api-completeness":   [8, 8, 8]
+  },
+  "averages": {
+    "correctness": 7.7,
+    "test-coverage": 7.7,
+    "error-handling": 8.0,
+    "production-readiness": 7.3,
+    "api-completeness": 8.0
+  },
+  "overall": 7.7,
+  "sigma": 0.2,
+  "adversarial_gap": 0.8,
+  "test_count": 97,
+  "fixes_applied": [
+    "Cargo.toml: OTLP deps 제거 (tonic/prost/opentelemetry-proto)",
+    "transport/http.rs: 빈 아웃바운드 토큰 → bail! (startup gate)",
+    "transport/spool.rs: commit() 빈 경로 early return (spurious warn 제거)",
+    "config.rs: dedup.lru_cap > 0 validate",
+    "coordinator/cycle.rs: 직렬화 실패 시 error! 로깅 (silent drop 제거)",
+    "coordinator/mod.rs: retry_base/retry_max config에서 읽기",
+    "coordinator/mod.rs: rx 채널 종료 시 return Ok(()) (run_pipeline exit)",
+    "pipeline/vector_receiver.rs: accept() 오류 후 100ms sleep (hot-loop 방지)",
+    "pipeline/vector_config.rs: TOML 생성 테스트 9개 추가"
+  ]
+}

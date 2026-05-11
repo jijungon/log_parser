@@ -1,0 +1,117 @@
+# Normalizer + Deduplicator — 처리 예시
+# 참조: 2_MASTER_PLAN.md §7.4
+# 치환 순서: UUID → IP → TIMESTAMP → PATH → HEX → NUM → WORD
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+예시 1: OOM Killer (count > 1)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+raw:        "Out of memory: Killed process 2481 (java)"
+
+[1] 치환:   "Out of memory: Killed process <NUM> (<WORD>)"
+
+[3] 집계:   key   = (fingerprint, host="db-01", source="syslog")
+            value = { count: 5, first_ts: 10:00:01, last_ts: 10:00:22,
+                      sample_raws: ["...2481 (java)", "...3102 (java)", "...3891 (java)"] }
+
+[4] flush:  "Out of memory: Killed process <NUM> (<WORD>)
+             × 5회 | 10:00:01 → 10:00:22 | sample: [pid 2481, 3102, 3891]"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+예시 2: SSH 인증 실패 (count > 1, IP 다양)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+raw:        "Failed password for invalid user admin from 203.0.113.42 port 51234 ssh2"
+            "Failed password for invalid user admin from 10.0.0.99 port 44821 ssh2"
+            "Failed password for invalid user admin from 198.51.100.7 port 60012 ssh2"
+            ... (윈도우 내 47회)
+
+[1] 치환:   "Failed password for invalid user admin from <IP> port <NUM> ssh2"
+
+[3] 집계:   { count: 47, first_ts: 10:00:01, last_ts: 10:00:28,
+              sample_raws: ["...203.0.113.42...", "...10.0.0.99...", "...198.51.100.7..."] }
+
+[4] flush:  "Failed password for invalid user admin from <IP> port <NUM> ssh2
+             × 47회 | 10:00:01 → 10:00:28 | sample: [203.0.113.42, 10.0.0.99, 198.51.100.7]"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+예시 3: HTTP 502 에러 (count == 1, 원본 그대로)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+raw:        "2026-05-07T10:01:33Z 502 GET /api/v2/users 0.843s upstream=app-03"
+
+[1] 치환:   "<TIMESTAMP> <NUM> GET <PATH> <NUM>s upstream=<WORD>-<NUM>"
+
+[3] 집계:   { count: 1, first_ts: 10:01:33, last_ts: 10:01:33,
+              sample_raws: ["2026-05-07T10:01:33Z 502 GET /api/v2/users ..."] }
+
+[4] flush:  "2026-05-07T10:01:33Z 502 GET /api/v2/users 0.843s upstream=app-03"
+            ← count == 1: 원본 그대로 방출 (맥락 손실 없음)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+예시 4: 디스크 I/O 에러 (count > 1, 버스트)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+raw:        "blk_update_request: I/O error, dev sdb, sector 4096000"
+            "blk_update_request: I/O error, dev sdb, sector 4096512"
+            "blk_update_request: I/O error, dev sdb, sector 4097024"
+            ... (윈도우 내 312회)
+
+[1] 치환:   "blk_update_request: I/O error, dev <WORD>, sector <NUM>"
+
+[3] 집계:   { count: 312, first_ts: 10:03:00, last_ts: 10:03:29,
+              sample_raws: ["...sector 4096000", "...sector 4096512", "...sector 4097024"] }
+
+[4] flush:  "blk_update_request: I/O error, dev <WORD>, sector <NUM>
+             × 312회 | 10:03:00 → 10:03:29 | sample: [sector 4096000, 4096512, 4097024]"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+예시 5: UUID 포함 트랜잭션 에러 (UUID 치환으로 수렴)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+raw:        "TxError: rollback on tx=550e8400-e29b-41d4-a716-446655440000 table=orders"
+            "TxError: rollback on tx=f47ac10b-58cc-4372-a567-0e02b2c3d479 table=orders"
+
+[1] 치환:   "TxError: rollback on tx=<UUID> table=<WORD>"
+            ↑ UUID 치환으로 서로 다른 트랜잭션이 같은 fingerprint로 묶임
+
+[3] 집계:   { count: 18, first_ts: 10:05:10, last_ts: 10:05:38,
+              sample_raws: ["...550e8400...", "...f47ac10b...", ...] }
+
+[4] flush:  "TxError: rollback on tx=<UUID> table=<WORD>
+             × 18회 | 10:05:10 → 10:05:38"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+예시 6: 파일 권한 에러 (경로 다양 → PATH 치환으로 수렴)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+raw:        "Permission denied: /var/data/tenant-001/report_2026.csv"
+            "Permission denied: /var/data/tenant-002/report_2026.csv"
+            "Permission denied: /tmp/upload_9f3a.tmp"
+
+[1] 치환:   "Permission denied: <PATH>"
+
+[3] 집계:   { count: 3, first_ts: 10:06:00, last_ts: 10:06:02,
+              sample_raws: [...] }
+
+[4] flush:  "Permission denied: <PATH>
+             × 3회 | 10:06:00 → 10:06:02 | sample: [/var/data/tenant-001/..., /var/data/tenant-002/..., /tmp/...]"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+예시 7: host가 달라 같은 fingerprint라도 별도 집계
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+raw (host=db-01): "Connection pool exhausted: max=100 active=100 idle=0"
+raw (host=db-02): "Connection pool exhausted: max=100 active=100 idle=0"
+
+[1] 치환:   "Connection pool exhausted: max=<NUM> active=<NUM> idle=<NUM>"
+
+[3] key가 다름:
+            (fingerprint, host="db-01", source="app.log") → { count: 7, ... }
+            (fingerprint, host="db-02", source="app.log") → { count: 2, ... }
+            ↑ fingerprint 동일해도 host 차이로 분리 → 각각 독립 flush
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+치환 규칙 및 적용 순서
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+순서  토큰          패턴 예시                           이유
+  1   <UUID>        550e8400-e29b-41d4-a716-...        내부 숫자가 <NUM>으로 먼저 깨지는 것 방지
+  2   <IP>          203.0.113.42 / ::1                 숫자 치환 전에 확정
+  3   <TIMESTAMP>   2026-05-07T10:01:33Z               ISO 8601, 숫자 포함
+  4   <PATH>        /var/log/app.log                   슬래시 포함 식별자
+  5   <HEX>         0x7fff4a2b                         순수 숫자보다 먼저
+  6   <NUM>         2481, 100, 0.843                   나머지 숫자 전부
+  7   <WORD>        app-03, sdb, java                  영숫자+기호 혼합 식별자 (가장 느슨)

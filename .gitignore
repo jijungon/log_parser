@@ -1,0 +1,6 @@
+target/
+data/spool/*
+!data/spool/.gitkeep
+.env
+test_server/storage/*.jsonl
+docs/sos-domain/

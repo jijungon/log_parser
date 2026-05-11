@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node *)",
+      "Read(//Users/joji/app/**)",
+      "Bash(tar -czf log_parser.tar.gz log_parser/)",
+      "Bash(curl --proto '=https' --tlsv1.2 -sSfL https://sh.vector.dev -o /tmp/vector-install.sh)",
+      "Read(//tmp/**)",
+      "Bash(bash /tmp/vector-install.sh -y --prefix /app/vector)",
+      "Bash(/app/vector/bin/vector --version)",
+      "Read(//app/vector/**)",
+      "Read(//var/log/journal/**)",
+      "Bash(journalctl --no-pager -n 1)",
+      "Bash(/app/vector/bin/vector validate *)",
+      "Bash(timeout 60 /app/vector/bin/vector --config /app/log_parser/phase_a/day1/vector.toml --quiet)",
+      "Bash(echo \"---exit $?---\")",
+      "Bash(python3 -c \"import sys, json; from collections import Counter; c=Counter\\(\\); [c.update\\([json.loads\\(l\\).get\\('name','?'\\)]\\) for l in sys.stdin]; [print\\(f'{n:>6}  {k}'\\) for k,n in c.most_common\\(15\\)]\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 *)",
+      "Bash(/app/vector/bin/vector list *)",
+      "Bash(/app/vector/bin/vector generate *)",
+      "Bash(dpkg -l)",
+      "Bash(sudo -n true)",
+      "Bash(cargo --version)",
+      "Bash(rustc --version)"
+    ]
+  }
+}

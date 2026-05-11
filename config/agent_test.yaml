@@ -1,0 +1,21 @@
+cycle:
+  window_seconds: 1800
+
+cgroup:
+  enabled: false
+
+pipeline:
+  vector_bin: "/app/vector/bin/vector"
+  vector_critical_sock: "/run/log_parser/events_critical.sock"
+  vector_normal_sock: "/run/log_parser/events_normal.sock"
+  vector_metrics_sock: "/run/log_parser/metrics.sock"
+  vector_max_restarts_per_hour: 5
+
+transport:
+  kind: "http_json"
+  endpoint: "http://127.0.0.1:8080/ingest"
+  token_env: "PUSH_OUTBOUND_TOKEN"
+  tls_enabled: false
+  connect_timeout_seconds: 5
+  request_timeout_seconds: 10
+  http_gzip_level: 6

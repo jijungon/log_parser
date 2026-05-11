@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "strategy": "debate",
+  "topic": "Phase B 진입 가능 여부",
+  "status": "completed",
+  "created_at": "2026-05-06T00:00:00Z",
+  "options": { "agents": 3, "model": "sonnet" },
+  "outcome": {
+    "verdict": "PRO with reservations",
+    "summary": "Step 1은 진입. Step 2 진입 전 envelope.body 측정 + RawEvent schema freeze 게이트 필수.",
+    "confidence": 8.5
+  },
+  "self_score": {
+    "overall": 8.5,
+    "criteria": { "accuracy": 8, "completeness": 8, "consistency": 9, "clarity": 9, "hallucination-risk": 9 }
+  },
+  "participants": [
+    { "role": "advocate", "position": "PRO" },
+    { "role": "advocate", "position": "CON" },
+    { "role": "judge" }
+  ],
+  "rounds_summary": [
+    { "round": 1, "phase": "opening", "summary": "PRO: 차단 요소 0/Step 1 위험 표면 좁음/한계 효용 급감. CON: 측정 공백/외부 contract 공백/기술부채" },
+    { "round": 2, "phase": "verdict", "summary": "Step 1 위험 표면 한정 논리 + Phase A 실측이 결정적. 4가지 안전망 권고로 CON 우려 흡수" }
+  ]
+}

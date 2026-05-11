@@ -1,0 +1,133 @@
+# Vector 0.55.0 — log_parser production config
+# log_parser 역할: 로그 파일 분석 전담 (host_metrics 제외)
+#
+# IPC 메커니즘: Vector socket sink → Rust agent Unix domain socket
+#   - /run/log_parser/events_critical.sock  : critical log 이벤트 (when_full=block)
+#   - /run/log_parser/events_normal.sock    : non-critical log 이벤트 (when_full=drop_newest)
+# 인증: 소켓 파일 권한(600, log_parser 프로세스 소유)으로 대체 — 별도 토큰 불필요
+
+data_dir = "/var/lib/log_parser/vector"
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+
+[sources.journald]
+type = "journald"
+# systemd journal 실시간 follow. distro 무관.
+# cursor는 data_dir에 자동 저장 — 재시작 후 이어서 follow
+
+# distro 분기: log_parser Agent 1이 /etc/os-release 파싱 후 활성화 (Phase B Step 3)
+# Ubuntu/Debian family:
+[sources.file_syslog]
+type = "file"
+include = ["/var/log/syslog"]
+read_from = "end"
+ignore_older_secs = 86400
+# RHEL/Rocky/AlmaLinux family (Step 3에서 distro에 따라 교체):
+# [sources.file_messages]
+# type = "file"
+# include = ["/var/log/messages"]
+# read_from = "end"
+# ignore_older_secs = 86400
+
+# 인증 로그 — Ubuntu: auth.log / RHEL: secure (Step 3에서 distro 분기)
+[sources.file_auth]
+type = "file"
+include = ["/var/log/auth.log"]
+read_from = "end"
+ignore_older_secs = 86400
+# RHEL/Rocky/AlmaLinux:
+# include = ["/var/log/secure"]
+
+# auditd — SELinux/AppArmor 이벤트, sudo, 파일 접근 감사
+# auditd가 없는 환경에서는 파일이 없어도 Vector가 graceful하게 skip
+[sources.file_audit]
+type = "file"
+include = ["/var/log/audit/audit.log"]
+read_from = "end"
+ignore_older_secs = 86400
+
+# ── Transforms ────────────────────────────────────────────────────────────────
+
+# 1. journald PRIORITY → severity 라벨
+[transforms.journald_severity]
+type = "remap"
+inputs = ["journald"]
+source = '''
+  priority = to_int(.PRIORITY) ?? 6
+  .log_parser_severity = if priority <= 2 {
+    "critical"
+  } else if priority == 3 {
+    "error"
+  } else if priority == 4 {
+    "warn"
+  } else {
+    "info"
+  }
+  .log_parser_source = "journald"
+'''
+
+# 2. syslog / messages 라벨
+[transforms.file_label]
+type = "remap"
+inputs = ["file_syslog"]
+source = '''
+  .log_parser_severity = "info"
+  .log_parser_source = "file.syslog"
+'''
+
+# 3. auth log 라벨
+[transforms.auth_label]
+type = "remap"
+inputs = ["file_auth"]
+source = '''
+  .log_parser_severity = "info"
+  .log_parser_source = "file.auth"
+'''
+
+# 4. audit log 라벨
+[transforms.audit_label]
+type = "remap"
+inputs = ["file_audit"]
+source = '''
+  .log_parser_severity = "info"
+  .log_parser_source = "file.audit"
+'''
+
+# 5. severity로 분기 — critical은 block, 나머지는 drop_newest
+[transforms.route_severity]
+type = "route"
+inputs = ["journald_severity", "file_label", "auth_label", "audit_label"]
+
+[transforms.route_severity.route]
+critical = '.log_parser_severity == "critical"'
+normal   = '.log_parser_severity != "critical"'
+
+# ── Sinks ─────────────────────────────────────────────────────────────────────
+
+# Critical 이벤트: Unix socket, block (drop 절대 금지)
+[sinks.to_rust_critical]
+type = "socket"
+inputs = ["route_severity.critical"]
+mode = "unix"
+path = "/run/log_parser/events_critical.sock"
+encoding.codec = "json"
+acknowledgements.enabled = true
+
+[sinks.to_rust_critical.buffer]
+type = "disk"
+max_size = 536870912   # 512MB
+when_full = "block"
+
+# Normal 이벤트: Unix socket, drop_newest (호스트 보호)
+[sinks.to_rust_normal]
+type = "socket"
+inputs = ["route_severity.normal"]
+mode = "unix"
+path = "/run/log_parser/events_normal.sock"
+encoding.codec = "json"
+acknowledgements.enabled = true
+
+[sinks.to_rust_normal.buffer]
+type = "disk"
+max_size = 536870912   # 512MB
+when_full = "drop_newest"

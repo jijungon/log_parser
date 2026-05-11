@@ -1,0 +1,205 @@
+# stat_report Response 예시
+# 참조: 2_MASTER_PLAN.md §7.8
+#
+# GET /stat 호출 시 캐시에서 즉시 반환 (< 100ms).
+# 7개 섹션: metrics / processes / network / systemd / static_state / config / hardware
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+시나리오: OOM 발생 직후 수신측이 GET /stat 호출
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  "event_kind": "stat_snapshot",
+
+  "cycle": {
+    "host":    "db-prod-03",
+    "host_id": "a8f3c1b9-4d2e-4f1a-b8c3-1234567890ab",
+    "boot_id": "f1a2b3c4-5d6e-7f8a-9b0c-abcdef012345",
+    "ts":      "2026-05-08T10:30:05Z"
+  },
+
+  "headers": {
+    "total_sections": 7,
+    "duration_ms":    43,
+    "last_changed_ts": "2026-05-08T10:15:00Z"
+  },
+
+  "body": [
+
+    {
+      "section": "metrics",
+      "data": {
+        "cpu": {
+          "usage_pct":   94.2,
+          "iowait_pct":  38.7,
+          "user_pct":    41.3,
+          "system_pct":  14.2
+        },
+        "memory": {
+          "total_mb":     32768,
+          "used_mb":      31940,
+          "free_mb":        134,
+          "available_mb":   694,
+          "swap_total_mb": 8192,
+          "swap_used_mb":  7801
+        },
+        "disk_io": {
+          "sdb": {
+            "reads_per_sec":  0,
+            "writes_per_sec": 412,
+            "util_pct":       99.8
+          }
+        },
+        "network": {
+          "eth0": {
+            "rx_bytes_per_sec": 124800,
+            "tx_bytes_per_sec":  38400
+          }
+        },
+        "load_avg": { "1m": 18.42, "5m": 12.31, "15m": 7.04 },
+        "pressure": {
+          "cpu":    { "some_pct": 72.3 },
+          "memory": { "some_pct": 91.4, "full_pct": 43.2 },
+          "io":     { "some_pct": 88.1, "full_pct": 61.7 }
+        }
+      }
+    },
+
+    {
+      "section": "processes",
+      "data": [
+        {
+          "pid": 2501, "name": "java",  "user": "app",
+          "cpu_pct": 41.2, "mem_pct": 28.4, "mem_rss_mb": 9314,
+          "state": "R", "threads": 128,
+          "open_files": 1024, "start_time": "2026-05-08T07:00:00Z"
+        },
+        {
+          "pid": 1834, "name": "postgres", "user": "postgres",
+          "cpu_pct": 18.3, "mem_pct": 14.1, "mem_rss_mb": 4623,
+          "state": "S", "threads": 32,
+          "open_files": 312, "start_time": "2026-05-08T07:00:12Z"
+        },
+        {
+          "pid":  891, "name": "vector",  "user": "log_parser",
+          "cpu_pct":  0.4, "mem_pct":  0.1, "mem_rss_mb":   47,
+          "state": "S", "threads": 8,
+          "open_files":  48, "start_time": "2026-05-08T07:00:03Z"
+        }
+      ]
+    },
+
+    {
+      "section": "network",
+      "data": {
+        "connections": {
+          "established": 312,
+          "time_wait":    84,
+          "close_wait":   17
+        },
+        "sockstat": {
+          "tcp_alloc":  428,
+          "udp_inuse":    8
+        },
+        "interfaces": {
+          "eth0": { "state": "UP", "mtu": 1500 }
+        }
+      }
+    },
+
+    {
+      "section": "systemd",
+      "data": [
+        {
+          "unit": "app-worker.service",
+          "load": "loaded", "active": "failed", "sub": "failed",
+          "restarts": 3, "main_pid": null,
+          "since": "2026-05-08T10:14:03Z"
+        },
+        {
+          "unit": "postgresql.service",
+          "load": "loaded", "active": "active", "sub": "running",
+          "restarts": 0, "main_pid": 1834,
+          "since": "2026-05-08T07:00:12Z"
+        },
+        {
+          "unit": "log-parser.service",
+          "load": "loaded", "active": "active", "sub": "running",
+          "restarts": 0, "main_pid": 889,
+          "since": "2026-05-08T07:00:01Z"
+        }
+      ]
+    },
+
+    {
+      "section": "static_state",
+      "data": {
+        "selinux": { "mode": "enforcing", "policy": "targeted" },
+        "sysctl": {
+          "vm.overcommit_memory":    "0",
+          "vm.swappiness":           "10",
+          "kernel.panic":            "30",
+          "net.core.somaxconn":      "1024",
+          "net.ipv4.tcp_tw_reuse":   "1"
+        },
+        "kernel_modules": ["ext4", "xfs", "overlay", "br_netfilter"],
+        "cmdline": "BOOT_IMAGE=/vmlinuz-5.15.0-117-generic root=/dev/sda1 ro quiet",
+        "ntp": {
+          "reference": "203.0.113.1", "offset_ms": 0.42, "stratum": 2
+        }
+      }
+    },
+
+    {
+      "section": "config",
+      "data": {
+        "files": {
+          "/etc/sysctl.conf": "vm.swappiness=10\nnet.core.somaxconn=1024\n",
+          "/etc/hosts":       "127.0.0.1 localhost\n10.0.0.10 db-prod-03\n",
+          "/etc/hostname":    "db-prod-03"
+        },
+        "packages": {
+          "total": 842,
+          "sample": [
+            { "name": "openjdk-17-jdk",   "version": "17.0.10+7-1" },
+            { "name": "postgresql-14",     "version": "14.11-1" },
+            { "name": "vector",            "version": "0.55.0" }
+          ]
+        }
+      }
+    },
+
+    {
+      "section": "hardware",
+      "data": {
+        "cpu": {
+          "model":   "Intel(R) Xeon(R) Gold 6248R",
+          "sockets": 2, "cores_per_socket": 24, "threads": 96
+        },
+        "memory": {
+          "total_mb": 32768,
+          "dimms": [
+            { "slot": "A1", "size_mb": 16384, "speed_mhz": 3200, "type": "DDR4" },
+            { "slot": "B1", "size_mb": 16384, "speed_mhz": 3200, "type": "DDR4" }
+          ]
+        },
+        "disks": [
+          {
+            "dev": "sda", "model": "Samsung SSD 870",
+            "size_gb": 480, "smart_status": "PASSED",
+            "reallocated_sectors": 0
+          },
+          {
+            "dev": "sdb", "model": "TOSHIBA MG06ACA",
+            "size_gb": 4000, "smart_status": "PASSED",
+            "reallocated_sectors": 7
+          }
+        ],
+        "pci": [
+          { "class": "Ethernet controller", "device": "Intel X550" }
+        ]
+      }
+    }
+
+  ]
+}

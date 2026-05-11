@@ -1,0 +1,32 @@
+cycle:
+  window_seconds: 1800
+
+cgroup:
+  enabled: false
+
+pipeline:
+  vector_bin: "/app/vector/bin/vector"
+  vector_critical_sock: "/run/log_parser/events_critical.sock"
+  vector_normal_sock: "/run/log_parser/events_normal.sock"
+  vector_metrics_sock: "/run/log_parser/metrics.sock"
+  vector_max_restarts_per_hour: 5
+
+transport:
+  kind: "http_json"
+  endpoint: "http://host.docker.internal:8080/ingest"   # 호스트에서 띄운 test-server
+  token_env: "PUSH_OUTBOUND_TOKEN"
+  tls_enabled: false
+  connect_timeout_seconds: 5
+  request_timeout_seconds: 10
+  http_gzip_level: 6
+
+inbound:
+  listen_addr: "0.0.0.0:9100"   # 컨테이너 내부 전체 바인드 (docker 포트 포워딩용)
+  token_env: "FLUSH_INBOUND_TOKEN"
+  rate_limit_per_hour: 60        # 개발 환경: 느슨하게
+  response_timeout_seconds: 10
+  envelope_size_limit_mb: 10
+
+dedup:
+  window_seconds: 30
+  lru_cap: 50000

@@ -1,0 +1,27 @@
+services:
+
+  log-parser:
+    container_name: log-parser
+    image: log-parser
+    build: .
+    pull_policy: never
+    environment:
+      PUSH_OUTBOUND_TOKEN: ${PUSH_OUTBOUND_TOKEN:-test-token}
+      FLUSH_INBOUND_TOKEN: ${FLUSH_INBOUND_TOKEN:-flush-secret}
+      STAT_INBOUND_TOKEN: ${STAT_INBOUND_TOKEN:-stat-secret}
+      SOS_INBOUND_TOKEN: ${SOS_INBOUND_TOKEN:-sos-secret}
+      CATEGORIES_PATH: /etc/log_parser/categories.yaml
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./config/agent_docker.yaml:/etc/log_parser/agent.yaml:ro
+      - ./config/categories.yaml:/etc/log_parser/categories.yaml:ro
+      - /app/vector:/app/vector:ro          # Vector 바이너리
+      - ./data/spool:/var/lib/log_parser    # spool WAL
+      - /var/log:/var/log:ro                # 호스트 syslog, auth.log 등
+      - /run/log/journal:/run/log/journal:ro # journald 현재 부팅 저널 (volatile)
+      - /var/log/journal:/var/log/journal:ro # journald 영구 저널 (persistent)
+    ports:
+      - "9100:9100"                         # /flush 엔드포인트
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # 호스트(test-server) 접근용
+    restart: unless-stopped

@@ -1,0 +1,143 @@
+# log_parser 카테고리 매핑
+# normalized log line (가변 토큰 치환 후)에 대해 첫 번째 매칭 패턴 적용 (first-match-wins)
+# 새 카테고리 추가: 이 파일 수정 + agent 재시작. 코드 변경 불필요.
+# 패턴은 대소문자 무시 substring 매칭 (regex 아님)
+#
+# 운영 1주차 후 실제 baseline 측정으로 권장 셋 조정 예정 (§17 #6)
+
+categories:
+  # ── 커널 ─────────────────────────────────────────────────────────────────
+  - pattern: "Out of memory: Killed"
+    category: kernel.oom
+
+  - pattern: "kernel BUG at"
+    category: kernel.bug
+
+  - pattern: "panic:"
+    category: kernel.panic
+
+  - pattern: "Kernel panic"
+    category: kernel.panic
+
+  - pattern: "segfault at"
+    category: process.crash
+
+  - pattern: "general protection fault"
+    category: process.crash
+
+  # ── 파일시스템 ────────────────────────────────────────────────────────────
+  - pattern: "EXT4-fs error"
+    category: fs.error
+
+  - pattern: "XFS: Internal error"
+    category: fs.error
+
+  - pattern: "remounting filesystem read-only"
+    category: fs.readonly
+
+  - pattern: "readonly"
+    category: fs.readonly
+
+  # ── 하드웨어 ─────────────────────────────────────────────────────────────
+  - pattern: "EDAC MC"
+    category: hw.mce
+
+  - pattern: "Hardware Error"
+    category: hw.mce
+
+  - pattern: "Machine Check"
+    category: hw.mce
+
+  - pattern: "SMART.*Threshold.*Exceeded"
+    category: disk.smart_error
+
+  # ── 디스크 I/O ────────────────────────────────────────────────────────────
+  - pattern: "I/O error"
+    category: disk.io_error
+
+  - pattern: "blk_update_request"
+    category: disk.io_error
+
+  - pattern: "ata.*error"
+    category: disk.io_error
+
+  # ── 네트워크 ──────────────────────────────────────────────────────────────
+  - pattern: "TCP: out of memory"
+    category: net.error
+
+  - pattern: "nf_conntrack: table full"
+    category: net.error
+
+  # ── systemd / 서비스 ──────────────────────────────────────────────────────
+  - pattern: "Failed to start"
+    category: systemd.unit_failure
+
+  - pattern: "failed with result"
+    category: systemd.unit_failure
+
+  - pattern: "Start request repeated too quickly"
+    category: systemd.restart_loop
+
+  # ── 인증 ─────────────────────────────────────────────────────────────────
+  - pattern: "authentication failure"
+    category: auth.failure
+
+  - pattern: "Failed password"
+    category: auth.failure
+
+  - pattern: "Invalid user"
+    category: auth.failure
+
+  - pattern: "Accepted publickey"
+    category: auth.event
+
+  - pattern: "POSSIBLE BREAK-IN ATTEMPT"
+    category: auth.bruteforce
+
+  - pattern: "Too many authentication failures"
+    category: auth.bruteforce
+
+  # ── NTP / 시간 동기화 ─────────────────────────────────────────────────────
+  - pattern: "System clock wrong"
+    category: ntp.drift
+
+  - pattern: "time step detected"
+    category: ntp.drift
+
+  - pattern: "time stepped"
+    category: ntp.drift
+
+  # ── 컨테이너 OOM ──────────────────────────────────────────────────────────
+  - pattern: "Memory cgroup out of memory"
+    category: container.oom
+
+  - pattern: "oom-kill-container"
+    category: container.oom
+
+  # ── 디스크 링크 에러 ──────────────────────────────────────────────────────
+  - pattern: "hard resetting link"
+    category: disk.link_error
+
+  - pattern: "SATA link down"
+    category: disk.link_error
+
+  - pattern: "exception Emask"
+    category: disk.link_error
+
+  # ── SELinux / AppArmor ────────────────────────────────────────────────────
+  - pattern: "avc: denied"
+    category: selinux.denial
+
+  - pattern: "type=AVC"
+    category: selinux.denial
+
+  # ── NIC / 네트워크 드라이버 ───────────────────────────────────────────────
+  - pattern: "NETDEV WATCHDOG"
+    category: net.watchdog
+
+  - pattern: "transmit queue timed out"
+    category: net.watchdog
+
+  # ── fallback ──────────────────────────────────────────────────────────────
+  - pattern: ""
+    category: system.general

@@ -1,0 +1,47 @@
+{
+  "type": "score",
+  "timestamp": "2026-04-30",
+  "target": "ARCHITECTURE.md",
+  "rubric": "bloat-check (custom)",
+  "criteria": ["conciseness", "redundancy", "scope-fit", "signal-to-noise", "abstraction-consistency"],
+  "weights": [0.25, 0.20, 0.20, 0.20, 0.15],
+  "judges": 3,
+  "judge_composition": "2 standard + 1 adversarial",
+  "scores": {
+    "conciseness": [4, 5, 4],
+    "redundancy": [4, 4, 4],
+    "scope-fit": [5, 7, 5],
+    "signal-to-noise": [5, 5, 4],
+    "abstraction-consistency": [5, 6, 5]
+  },
+  "averages": {
+    "conciseness": 4.33,
+    "redundancy": 4.00,
+    "scope-fit": 5.67,
+    "signal-to-noise": 4.67,
+    "abstraction-consistency": 5.33
+  },
+  "judge_finals": { "j1_std": 4.55, "j2_std": 5.35, "j3_adv": 4.30 },
+  "standard_avg": 4.95,
+  "adversarial": 4.30,
+  "adversarial_gap": 0.65,
+  "sigma_std": 0.40,
+  "bias_check": "Standard sigma 0.40 (high agreement). Adversarial gap 0.65 (normal). No shared bias detected.",
+  "overall": 4.73,
+  "consensus_findings_3of3": [
+    "§3.4 8 sub-tables (lines 451-526) duplicate §3.3 single comparison table",
+    "12 'terminology' tables redefine common terms (OOM, sosreport, SAR, docker_logs duplicated; RSS/OOM/tar/blake3/NDJSON/Cargo too generic)",
+    "§7 directory + §8 'Phase B first step' duplicates PHASE_B_PLAN.md content"
+  ],
+  "consensus_findings_2of3": [
+    "§5.3 unified RCA scenario (lines 678-707) crosses into external-service scope (design principle #3)",
+    "§6 'core guarantees' table (lines 723-731) restates §2.1/§2.2/§2.5",
+    "§3.5 and §3.6 both rephrase §3.3"
+  ],
+  "adversarial_only": [
+    "§3.4.7 Docker subsection (lines 504-510) — Docker not in Phase A measurements or CLAUDE.md scope",
+    "§5.3 timeline values (03:00:14, 92%, x47) are illustrative not measured — not flagged as example"
+  ],
+  "estimated_trim": "795 lines → ~520 lines (~35% reduction) if 3 consensus items applied",
+  "verdict": "Significant trimming recommended. Core sections (§0, §1, §2, §4) are clean; bloat concentrates in §3 latter half + §5 + §6 + §7-§8."
+}
