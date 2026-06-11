@@ -4,3 +4,4 @@ data/spool/*
 .env
 test_server/storage/*.jsonl
 docs/sos-domain/
+next_step.md

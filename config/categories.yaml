@@ -1,9 +1,14 @@
 # log_parser 카테고리 매핑
-# normalized log line (가변 토큰 치환 후)에 대해 첫 번째 매칭 패턴 적용 (first-match-wins)
+# 원본 로그 라인에 대해 첫 번째 매칭 패턴 적용 (first-match-wins)
 # 새 카테고리 추가: 이 파일 수정 + agent 재시작. 코드 변경 불필요.
-# 패턴은 대소문자 무시 substring 매칭 (regex 아님)
+# 패턴은 대소문자 무시 "정규식(regex)"으로 컴파일된다 (categories.rs / RegexBuilder).
+#   → 괄호 ( ) 등 regex 특수문자는 \( \) 로 이스케이프할 것.
+#   → 구체적 패턴을 광범위 패턴보다 위에 둘 것 (first-match-wins).
 #
-# 운영 1주차 후 실제 baseline 측정으로 권장 셋 조정 예정 (§17 #6)
+# 2026-06-11 baseline 점검 반영:
+#   - 광범위 패턴 "readonly" 제거 (무관 로그 오분류 위험)
+#   - "ata.*error" 정밀화 ("fatal ... error" 등 오분류 방지)
+#   - 실서버(file.auth)에서 미분류되던 sshd 세션·로그인 패턴 추가
 
 categories:
   # ── 커널 ─────────────────────────────────────────────────────────────────
@@ -35,9 +40,6 @@ categories:
   - pattern: "remounting filesystem read-only"
     category: fs.readonly
 
-  - pattern: "readonly"
-    category: fs.readonly
-
   # ── 하드웨어 ─────────────────────────────────────────────────────────────
   - pattern: "EDAC MC"
     category: hw.mce
@@ -58,7 +60,8 @@ categories:
   - pattern: "blk_update_request"
     category: disk.io_error
 
-  - pattern: "ata.*error"
+  # ata 포트 로그 형식(ata1.00: ...)만 매칭 — "fatal ... error" 오분류 방지
+  - pattern: 'ata[0-9]+(\.[0-9]+)?: .*error'
     category: disk.io_error
 
   # ── 네트워크 ──────────────────────────────────────────────────────────────
@@ -79,6 +82,16 @@ categories:
     category: systemd.restart_loop
 
   # ── 인증 ─────────────────────────────────────────────────────────────────
+  # 구체적(bruteforce 신호) 패턴이 일반 실패 패턴보다 먼저 와야 한다
+  - pattern: "Failed password for invalid user"
+    category: auth.bruteforce
+
+  - pattern: "POSSIBLE BREAK-IN ATTEMPT"
+    category: auth.bruteforce
+
+  - pattern: "Too many authentication failures"
+    category: auth.bruteforce
+
   - pattern: "authentication failure"
     category: auth.failure
 
@@ -91,11 +104,12 @@ categories:
   - pattern: "Accepted publickey"
     category: auth.event
 
-  - pattern: "POSSIBLE BREAK-IN ATTEMPT"
-    category: auth.bruteforce
+  - pattern: "Accepted password"
+    category: auth.event
 
-  - pattern: "Too many authentication failures"
-    category: auth.bruteforce
+  # sshd 세션 열림/닫힘 (실서버 baseline에서 미분류로 확인된 패턴)
+  - pattern: 'pam_unix\(sshd:session\): session (opened|closed)'
+    category: auth.event
 
   # ── NTP / 시간 동기화 ─────────────────────────────────────────────────────
   - pattern: "System clock wrong"

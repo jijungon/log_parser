@@ -950,9 +950,17 @@ pub async fn collect_logs(log_paths: &[String]) -> Value {
     let log_paths = log_paths.to_vec();
     tokio::task::spawn_blocking(move || {
         use crate::dedup::window::DedupWindow;
+        use crate::normalize::categories::CategoryMatcher;
         use crate::normalize::{fields, severity, tokens};
         use chrono::Datelike;
         use std::io::BufRead;
+
+        // coordinator(30분 push)와 동일한 분류 규칙 적용.
+        // 미적용 시 sos 응답의 모든 로그가 system.general로 빠진다.
+        let categories_path = std::env::var("CATEGORIES_PATH")
+            .unwrap_or_else(|_| crate::DEFAULT_CATEGORIES.to_string());
+        let categories = CategoryMatcher::load(&categories_path)
+            .unwrap_or_else(|_| CategoryMatcher::fallback());
 
         let cutoff: DateTime<Utc> = Utc::now() - Duration::hours(4);
         let max_events = 500usize;
@@ -1029,9 +1037,11 @@ pub async fn collect_logs(log_paths: &[String]) -> Value {
                         h.finish()
                     };
 
+                    let category = categories.categorize(&line).to_string();
+
                     if let Some(emitted) = window.push(
                         fingerprint, source.clone(), sev.to_string(),
-                        "system.general".to_string(), template, line, ts, fields_map,
+                        category, template, line, ts, fields_map,
                     ) {
                         all_events.push(emitted);
                         if all_events.len() >= max_events { break 'outer; }

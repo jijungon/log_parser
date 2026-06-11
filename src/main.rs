@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tracing::info;
 
 const DEFAULT_CONFIG: &str = "/etc/log_parser/agent.yaml";
-const DEFAULT_CATEGORIES: &str = "/etc/log_parser/categories.yaml";
+pub const DEFAULT_CATEGORIES: &str = "/etc/log_parser/categories.yaml";
 const RUNTIME_VECTOR_CONFIG: &str = "/run/log_parser/vector.toml";
 
 #[tokio::main]
