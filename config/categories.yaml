@@ -111,6 +111,14 @@ categories:
   - pattern: 'pam_unix\(sshd:session\): session (opened|closed)'
     category: auth.event
 
+  # sshd 세션 종료(정상 로그아웃·원격 접속 끊김) — "로그인 활동/접속 명단" 추적용
+  # (2026-06-15 diagnose: q224 등에서 미분류로 확인됨. bruteforce는 위에서 먼저 잡힘)
+  - pattern: "Disconnected from user"
+    category: auth.event
+
+  - pattern: "Received disconnect from"
+    category: auth.event
+
   # ── NTP / 시간 동기화 ─────────────────────────────────────────────────────
   - pattern: "System clock wrong"
     category: ntp.drift
