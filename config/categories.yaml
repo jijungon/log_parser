@@ -119,6 +119,28 @@ categories:
   - pattern: "Received disconnect from"
     category: auth.event
 
+  # ── 세션 활동 (systemd-logind·cron 세션 수명주기) ─────────────────────────
+  # sshd 인증/세션은 위 auth.event 가 먼저 잡고, 여기는 그 외 세션 노이즈를 모은다.
+  # (2026-06-15 diagnose: "출입/세션" 질문에서 이 로그들이 auth.event 를 밀어내
+  #  system.general 잡로그로 방치되던 것을 별도 카테고리로 분리)
+  - pattern: 'pam_unix\(cron:session\)'
+    category: session.activity
+
+  - pattern: "New session [0-9]+ of user"
+    category: session.activity
+
+  - pattern: "Started Session [0-9]+ of"
+    category: session.activity
+
+  - pattern: "Removed session [0-9]+"
+    category: session.activity
+
+  - pattern: "Session [0-9]+ logged out"
+    category: session.activity
+
+  - pattern: 'session-[0-9]+\.scope'
+    category: session.activity
+
   # ── NTP / 시간 동기화 ─────────────────────────────────────────────────────
   - pattern: "System clock wrong"
     category: ntp.drift
