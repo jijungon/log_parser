@@ -5,6 +5,10 @@
 #   → 괄호 ( ) 등 regex 특수문자는 \( \) 로 이스케이프할 것.
 #   → 구체적 패턴을 광범위 패턴보다 위에 둘 것 (first-match-wins).
 #
+# 선택 필드 `program:` — syslog 헤더의 program(태그, 예: sshd/CRON/kernel)을 같이 본다.
+#   설정 시: 그 program 일 때만 패턴을 적용한다 (본문이 같아도 출처가 다른 로그를 가른다).
+#   미설정 시: 기존처럼 본문만으로 매칭. (헤더 없는 로그는 program=None → program 규칙은 건너뜀)
+#
 # 2026-06-11 baseline 점검 반영:
 #   - 광범위 패턴 "readonly" 제거 (무관 로그 오분류 위험)
 #   - "ata.*error" 정밀화 ("fatal ... error" 등 오분류 방지)
@@ -101,22 +105,28 @@ categories:
   - pattern: "Invalid user"
     category: auth.failure
 
+  # sshd 인증 이벤트 — program=sshd 로 앵커 (다른 프로그램이 같은 문구를 써도 안 섞임)
   - pattern: "Accepted publickey"
+    program: sshd
     category: auth.event
 
   - pattern: "Accepted password"
+    program: sshd
     category: auth.event
 
   # sshd 세션 열림/닫힘 (실서버 baseline에서 미분류로 확인된 패턴)
   - pattern: 'pam_unix\(sshd:session\): session (opened|closed)'
+    program: sshd
     category: auth.event
 
   # sshd 세션 종료(정상 로그아웃·원격 접속 끊김) — "로그인 활동/접속 명단" 추적용
   # (2026-06-15 diagnose: q224 등에서 미분류로 확인됨. bruteforce는 위에서 먼저 잡힘)
   - pattern: "Disconnected from user"
+    program: sshd
     category: auth.event
 
   - pattern: "Received disconnect from"
+    program: sshd
     category: auth.event
 
   # ── 세션 활동 (systemd-logind·cron 세션 수명주기) ─────────────────────────
@@ -124,6 +134,7 @@ categories:
   # (2026-06-15 diagnose: "출입/세션" 질문에서 이 로그들이 auth.event 를 밀어내
   #  system.general 잡로그로 방치되던 것을 별도 카테고리로 분리)
   - pattern: 'pam_unix\(cron:session\)'
+    program: CRON
     category: session.activity
 
   - pattern: "New session [0-9]+ of user"

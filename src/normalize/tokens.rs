@@ -29,6 +29,24 @@ pub fn strip_syslog_prefix(msg: &str) -> &str {
     msg
 }
 
+// syslog 헤더에서 program(태그)만 캡처: "<시각> <host> <program>[<pid>]: " 의 program.
+// RFC 3164·ISO 둘 다. 헤더가 없으면 매칭 안 됨(None).
+static SYSLOG_PROGRAM: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^(?:[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}|(?:<\d{1,3}>\d?\s+)?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)\s+\S+\s+([A-Za-z0-9_.\-]+?)(?:\[\d+\])?:\s",
+    )
+    .unwrap()
+});
+
+/// syslog 헤더의 program(태그)을 추출한다 (sshd, CRON, systemd-logind, kernel …).
+/// 헤더가 없으면 None. 카테고리 분류에서 "출처 프로그램" 조건으로 쓰인다.
+pub fn syslog_program(line: &str) -> Option<&str> {
+    SYSLOG_PROGRAM
+        .captures(line)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())
+}
+
 /// 순서 중요: 더 구체적인 패턴이 먼저 와야 함
 static PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
     vec![
@@ -55,6 +73,29 @@ static PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
             )
             .unwrap(),
             "<IP6>",
+        ),
+        // ── 컨테이너/네트워크 런타임 ID (Docker 호스트 노이즈 → fingerprint 분산 주범) ──
+        // 컨테이너마다 달라지는 랜덤 ID를 placeholder로 묶어 같은 사건이 한 template이 되게 한다.
+        // PATH/HEX/NUM 보다 먼저 와야 함 (랜덤 ID가 NUM/HEX로 쪼개지기 전에 통째로 치환).
+        // docker-<hex>.scope 의 컨테이너 ID
+        (
+            Regex::new(r"(?i)\bdocker-[0-9a-f]{12,64}\b").unwrap(),
+            "<CID>",
+        ),
+        // veth 가상 인터페이스 (veth7dbd160 …)
+        (
+            Regex::new(r"(?i)\bveth[0-9a-f]{6,}\b").unwrap(),
+            "<VETH>",
+        ),
+        // 도커 브리지 (br-754c2e451615)
+        (
+            Regex::new(r"(?i)\bbr-[0-9a-f]{12}\b").unwrap(),
+            "<BR>",
+        ),
+        // overlay2 / buildkit / runc / netns 마운트의 랜덤 ID
+        (
+            Regex::new(r"(?i)\b(?:overlay2|buildkit-executor|buildkit|runc|netns)[-/][0-9a-z]{8,}").unwrap(),
+            "<MNT>",
         ),
         // MAC address  aa:bb:cc:dd:ee:ff
         (
@@ -166,6 +207,35 @@ mod tests {
     fn replaces_ipv6_loopback() {
         // 선두 "::" 형태 (loopback ::1)
         assert_eq!(normalize("from ::1 port 22"), "from <IP6> port <NUM>");
+    }
+
+    #[test]
+    fn replaces_container_runtime_ids() {
+        assert_eq!(normalize("device veth7dbd160 left promiscuous mode"),
+                   "device <VETH> left promiscuous mode");
+        assert_eq!(normalize("br-754c2e451615: port 1 up"),
+                   "<BR>: port <NUM> up");
+        let cid = normalize("docker-fae7e8b692d583c986b470e9560ac81fc72b85a96e7d7c369f36b7c91f369394.scope: Deactivated");
+        assert!(cid.starts_with("<CID>.scope"), "got: {cid}");
+        assert_eq!(normalize("var-lib-docker-overlay2-hlbif58yuggf2zvwx7oweycqo-merged.mount up"),
+                   "var-lib-docker-<MNT>-merged.mount up");
+    }
+
+    #[test]
+    fn container_tokens_do_not_touch_normal_logs() {
+        // 정상 로그는 그대로 (process 번호만 NUM)
+        assert_eq!(normalize("Out of memory: Killed process 2481 (java)"),
+                   "Out of memory: Killed process <NUM> (java)");
+    }
+
+    #[test]
+    fn extracts_syslog_program() {
+        assert_eq!(syslog_program("Jun 11 03:34:29 host sshd[3118225]: pam_unix(sshd:session): x"), Some("sshd"));
+        assert_eq!(syslog_program("Jun 14 23:05:01 host CRON[3210742]: pam_unix(cron:session): x"), Some("CRON"));
+        assert_eq!(syslog_program("Jun 11 03:34:29 host systemd-logind[657]: New session 8125 of user root."), Some("systemd-logind"));
+        assert_eq!(syslog_program("May  8 10:13:42 host kernel: Out of memory"), Some("kernel"));
+        assert_eq!(syslog_program("2026-06-15T00:25:23.1+00:00 host sshd[1]: Accepted publickey"), Some("sshd"));
+        assert_eq!(syslog_program("plain line without header"), None);
     }
 
     #[test]
