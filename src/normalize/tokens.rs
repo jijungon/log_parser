@@ -7,9 +7,26 @@ static SYSLOG_PREFIX: Lazy<Regex> = Lazy::new(|| {
         .unwrap()
 });
 
-/// syslog 헤더(타임스탬프+호스트+프로세스)를 제거하고 메시지 본문만 반환
+// RFC 5424 / ISO 8601 타임스탬프 헤더 (rsyslog RSYSLOG_FileFormat):
+//   "2026-06-15T00:25:23.123456+00:00 hostname proc[PID]: "
+//   선택적 PRI/version 접두(예: "<34>1 ")도 허용. tz(Z 또는 ±hh:mm)·소수초는 선택.
+static SYSLOG_PREFIX_ISO: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^(?:<\d{1,3}>\d?\s+)?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\s+\S+\s+[^\s:]+(?:\[\d+\])?:\s*",
+    )
+    .unwrap()
+});
+
+/// syslog 헤더(타임스탬프+호스트+프로세스)를 제거하고 메시지 본문만 반환.
+/// RFC 3164(전통적 syslog)와 RFC 5424/ISO 타임스탬프 형식을 모두 처리한다.
 pub fn strip_syslog_prefix(msg: &str) -> &str {
-    SYSLOG_PREFIX.find(msg).map_or(msg, |m| &msg[m.end()..])
+    if let Some(m) = SYSLOG_PREFIX.find(msg) {
+        return &msg[m.end()..];
+    }
+    if let Some(m) = SYSLOG_PREFIX_ISO.find(msg) {
+        return &msg[m.end()..];
+    }
+    msg
 }
 
 /// 순서 중요: 더 구체적인 패턴이 먼저 와야 함
@@ -27,6 +44,17 @@ static PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
         (
             Regex::new(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b").unwrap(),
             "<IP4>",
+        ),
+        // IPv6 — MAC/HEX/NUM보다 먼저.
+        // 세 형태: ① full 8그룹(7콜론) ② LEFT그룹들 + "::" + 선택 RIGHT ③ 선두 "::RIGHT"
+        // "::" 압축 또는 8그룹을 요구하므로 6그룹 MAC·HH:MM:SS 시각과 충돌하지 않음.
+        // leftmost-first(Perl/Rust) 의미에서 압축형이 부분매칭되지 않도록 RIGHT를 greedy로 흡수.
+        (
+            Regex::new(
+                r"(?i)(?:\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b|\b(?:[0-9a-f]{1,4}:)+:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)",
+            )
+            .unwrap(),
+            "<IP6>",
         ),
         // MAC address  aa:bb:cc:dd:ee:ff
         (
@@ -92,8 +120,70 @@ mod tests {
     }
 
     #[test]
+    fn strip_syslog_iso_full_prefix() {
+        let line = "2026-06-15T00:25:23.123456+00:00 myhost sshd[1234]: Connection from fe80::1";
+        assert_eq!(strip_syslog_prefix(line), "Connection from fe80::1");
+    }
+
+    #[test]
+    fn strip_syslog_iso_no_pid() {
+        let line = "2026-06-15T00:25:23+00:00 host kernel: Oops";
+        assert_eq!(strip_syslog_prefix(line), "Oops");
+    }
+
+    #[test]
+    fn strip_syslog_iso_zulu() {
+        let line = "2026-06-15T00:25:23Z host cron[9]: job done";
+        assert_eq!(strip_syslog_prefix(line), "job done");
+    }
+
+    #[test]
+    fn strip_syslog_iso_with_pri_version() {
+        let line = "<34>1 2026-06-15T00:25:23.5Z host su[42]: failed";
+        assert_eq!(strip_syslog_prefix(line), "failed");
+    }
+
+    #[test]
     fn replaces_ipv4() {
         assert_eq!(normalize("connect from 192.168.1.100 failed"), "connect from <IP4> failed");
+    }
+
+    #[test]
+    fn replaces_ipv6_full() {
+        assert_eq!(
+            normalize("peer 2001:0db8:0000:0000:0000:ff00:0042:8329 up"),
+            "peer <IP6> up"
+        );
+    }
+
+    #[test]
+    fn replaces_ipv6_compressed() {
+        assert_eq!(normalize("link to fe80::1 ready"), "link to <IP6> ready");
+        assert_eq!(normalize("addr 2001:db8::ff00:42:8329 seen"), "addr <IP6> seen");
+    }
+
+    #[test]
+    fn replaces_ipv6_loopback() {
+        // 선두 "::" 형태 (loopback ::1)
+        assert_eq!(normalize("from ::1 port 22"), "from <IP6> port <NUM>");
+    }
+
+    #[test]
+    fn replaces_ipv6_link_local() {
+        assert_eq!(normalize("fe80::a00:27ff:fe4e:66a1 nbr"), "<IP6> nbr");
+    }
+
+    #[test]
+    fn ipv6_does_not_eat_mac() {
+        // MAC(6그룹·:: 없음)은 IPv6로 잡히면 안 되고 <HEX>로 가야 함
+        assert_eq!(normalize("device aa:bb:cc:dd:ee:ff connected"), "device <HEX> connected");
+    }
+
+    #[test]
+    fn ipv6_not_split_into_num() {
+        let result = normalize("client fe80::1 disconnected");
+        assert!(result.contains("<IP6>"), "got: {result}");
+        assert!(!result.contains("<NUM>"), "IPv6 should not become NUM: {result}");
     }
 
     #[test]
