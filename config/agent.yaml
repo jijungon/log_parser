@@ -6,6 +6,9 @@ cycle:
   window_seconds: 1800              # envelope 송출 주기 (default 30분)
   host_id_override: ""              # /etc/machine-id 부재 시 fallback (비어 있으면 부팅 거부)
   boot_id_fallback: ""              # /proc/sys/kernel/random/boot_id 부재 시 fallback
+  host_override: ""                 # 호스트 표시명 고정값 (비면 OS hostname). 컨테이너는
+                                    # hostname=컨테이너ID라 재시작 시 바뀜 → 멀티서버면 서버명 박기
+                                    #   예: "grafana-prod-01"
 
 cgroup:
   enabled: true

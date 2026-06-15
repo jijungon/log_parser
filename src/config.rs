@@ -27,6 +27,11 @@ pub struct CycleConfig {
     pub host_id_override: String,
     #[serde(default)]
     pub boot_id_fallback: String,
+    /// 안정적인 호스트 표시명. 비어 있으면 OS hostname 사용.
+    /// 컨테이너에서 돌면 hostname=컨테이너ID라 재시작 시 바뀌므로,
+    /// 멀티서버 식별을 위해 서버명/IP 같은 고정값을 박아둔다.
+    #[serde(default)]
+    pub host_override: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +161,7 @@ impl Default for CycleConfig {
             window_seconds: default_window_seconds(),
             host_id_override: String::new(),
             boot_id_fallback: String::new(),
+            host_override: String::new(),
         }
     }
 }

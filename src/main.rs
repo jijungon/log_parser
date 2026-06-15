@@ -60,9 +60,15 @@ async fn main() -> Result<()> {
 
     // ── 호스트 메타데이터 ─────────────────────────────────────────────────────
 
-    let host = hostname::get()
-        .map(|h| h.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "unknown".to_string());
+    // 안정적 호스트명: agent.yaml의 host_override 우선, 없으면 OS hostname.
+    // (컨테이너 hostname은 컨테이너ID라 재시작 시 바뀌므로 멀티서버에선 override 권장)
+    let host = if !cfg.cycle.host_override.is_empty() {
+        cfg.cycle.host_override.clone()
+    } else {
+        hostname::get()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unknown".to_string())
+    };
     // boot_id + host_id: one-time /proc + /etc reads — offload to avoid blocking executor
     let boot_id_fallback = cfg.cycle.boot_id_fallback.clone();
     let host_id_override = cfg.cycle.host_id_override.clone();
