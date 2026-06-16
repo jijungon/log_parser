@@ -6,6 +6,29 @@
 
 ---
 
+## ⭐ 가장 중요한 파일 (반드시 직접 관리)
+
+각 파일이 하는 일은 다음과 같다.
+
+### `config/agent.yaml` — 에이전트 동작 정의 ⭐
+
+수집 대상(journald·syslog·auth.log 등 어떤 로그를 모을지), 전송 주기·목적지(30분마다 어느 수신측으로 push),
+호스트 식별(`cycle.host_override` 로 표시 이름 고정), inbound 포트·토큰, spool·재시도 정책 등
+**에이전트의 모든 동작**을 정의한다. 이 파일이 잘못되면 데이터 수집·전송 자체가 흔들린다.
+
+### `config/categories.yaml` — 로그 분류 규칙 ⭐
+
+원본 로그를 카테고리(예: `kernel.oom`, `auth.event`, `session.activity`)로 가르는 규칙이다.
+위에서부터 first-match-wins 정규식으로 매칭하고, `program:` 조건으로 출처(sshd/CRON 등)까지 구분한다(본문이 같아도 출처가 다른 로그를 가름).
+규칙을 구체적인 것일수록 위에, 광범위한 것일수록 아래에 두며 맨 끝의 빈 패턴이 `system.general` fallback이다.
+이 카테고리 체계가 **시스템 전체의 뼈대**라서, 수신측(log_stack_AI)의 검색 한국어 설명(`CATEGORY_KO`)·`goldset.yaml`·`playbook.yaml` 이 모두 여기에 맞물려 있다.
+**분류가 어긋나면 수신측 분석·검색 품질이 그대로 떨어진다.** 코드 변경 없이 이 파일 수정 + 에이전트 재시작으로 반영된다.
+
+> 따라서 **`categories.yaml` 을 바꾸면** 수신측의 `CATEGORY_KO`·`goldset.yaml`(검색 채점 기준)·`playbook.yaml`(원인·대처 지식)도
+> **반드시 같이 손봐야 한다**(카테고리가 서로 맞물려 있음).
+
+---
+
 ## 전체 흐름
 
 ```
@@ -112,6 +135,13 @@ environment:
 ```
 
 > `PUSH_OUTBOUND_TOKEN` · `FLUSH_INBOUND_TOKEN` · `STAT_INBOUND_TOKEN` · `SOS_INBOUND_TOKEN` 중 하나라도 비어있으면 **에이전트 기동이 거부**됩니다.
+
+**호스트 식별 (다중 서버 운영 시)** — `cycle.host_id` 는 machine-id 기반으로 자동 산출되어 재설치 전까지 불변입니다. 표시용 이름 `cycle.host` 는 기본적으로 시스템 hostname 을 쓰지만, 여러 서버를 한 수신측으로 모으거나 컨테이너에서 hostname 이 불안정할 때는 `agent.yaml` 의 `cycle.host_override` 로 고정할 수 있습니다.
+
+```yaml
+cycle:
+  host_override: "web-prod-01"   # 비우면 시스템 hostname 사용
+```
 
 ---
 
@@ -225,7 +255,7 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 | 필드 | 타입 | 설명 |
 |------|------|------|
 | `event_kind` | string | `"log_batch"` / `"stat_snapshot"` / `"sos_snapshot"` |
-| `cycle.host` | string | 호스트명 |
+| `cycle.host` | string | 호스트명 (기본 시스템 hostname, `cycle.host_override` 로 고정 가능) |
 | `cycle.host_id` | string | 호스트 고유 ID (machine-id 기반, 재설치 전까지 불변) |
 | `cycle.boot_id` | string | 부팅 고유 ID (재부팅마다 변경) |
 | `cycle.ts` | RFC3339 | `log_batch`: cycle 시작 타임스탬프 / `stat_snapshot`·`sos_snapshot`: 수집 시각 |
@@ -392,10 +422,17 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 |-------------|---------|
 | `<NUM>` | 숫자 (PID, 포트, 횟수 등) |
 | `<IP4>` | IPv4 주소 |
+| `<IP6>` | IPv6 주소 |
 | `<UUID>` | UUID |
 | `<PATH>` | 파일시스템 경로 (2단계 이상) |
 | `<HEX>` | MAC 주소, 16진수 값 |
 | `<DEV>` | 블록 디바이스명 (sda1, nvme0n1 등) |
+| `<CID>` | 컨테이너 ID (`docker-<hex>` 등) |
+| `<VETH>` | 가상 이더넷 인터페이스 (`veth...`) |
+| `<BR>` | 도커 브리지 (`br-<hex>`) |
+| `<MNT>` | 컨테이너 마운트 경로 (overlay2/buildkit/runc/netns) |
+
+> **컨테이너·IPv6 토큰화** — 같은 컨테이너 내부에서 발생해도 매번 ID가 바뀌는 `veth`·`br-`·`docker-<hex>`·overlay 마운트 경로 등을 placeholder로 치환합니다. 이 토큰화 덕분에 동일 패턴의 컨테이너/네트워크 로그가 ID 차이로 서로 다른 fingerprint로 흩어지지 않고 하나로 묶입니다. RFC5424/ISO 형식의 syslog 프리픽스도 정규화 단계에서 제거됩니다.
 
 ---
 
@@ -420,14 +457,17 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 | `systemd.unit_failure` | `Failed to start`, `failed with result` | 서비스 시작 실패 |
 | `systemd.restart_loop` | `Start request repeated too quickly` | 서비스 재시작 루프 |
 | `auth.failure` | `authentication failure`, `Failed password`, `Invalid user` | 인증 실패 |
-| `auth.event` | `Accepted publickey` | 인증 성공 이벤트 |
-| `auth.bruteforce` | `POSSIBLE BREAK-IN ATTEMPT`, `Too many authentication failures` | 브루트포스 의심 |
+| `auth.event` | `Accepted publickey/password`, `pam_unix(sshd:session)`, `Disconnected from user`, `Received disconnect` *(program=sshd)* | sshd 로그인·접속 이벤트 |
+| `auth.bruteforce` | `Failed password for invalid user`, `POSSIBLE BREAK-IN ATTEMPT`, `Too many authentication failures` | 브루트포스 의심 |
+| `session.activity` | `pam_unix(cron:session)` *(program=CRON)*, `New/Started/Removed session N`, `Session N logged out`, `session-N.scope` | cron·logind 세션 수명주기 |
 | `ntp.drift` | `System clock wrong`, `time stepped` | 시간 동기화 오류 |
 | `container.oom` | `Memory cgroup out of memory`, `oom-kill-container` | 컨테이너 OOM |
 | `selinux.denial` | `avc: denied`, `type=AVC` | SELinux/AppArmor 차단 |
 | `system.general` | *(위 패턴 미매칭 전체)* | 일반 로그 |
 
 카테고리 추가: `/etc/log_parser/categories.yaml` 수정 후 에이전트 재시작으로 코드 변경 없이 적용됩니다.
+
+> **program 조건 (선택 필드)** — 규칙에 `program: sshd` 처럼 syslog 헤더의 program(태그)을 명시하면 **그 프로그램의 로그일 때만** 패턴을 적용합니다. 본문 문구가 같아도 출처가 다른 로그(예: sshd 세션 vs cron 세션)를 가르기 위함입니다. 미설정 규칙은 기존처럼 본문만으로 매칭합니다.
 
 ---
 
