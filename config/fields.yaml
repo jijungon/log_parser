@@ -16,7 +16,9 @@ fields:
     numeric: true
 
   # SSH / PAM: "for user root" / "for invalid user admin"
-  - pattern: 'for (?:invalid )?user (\S+)'
+  # [^\s(]+ : 공백·여는괄호 전까지만 → "root(uid=0) by (uid=0)" 로그의 (uid=0) 꼬리표를 잘라
+  #           root 로 정규화(값 파편화 방지). www-data·user.name 등 하이픈/점 이름은 보존.
+  - pattern: 'for (?:invalid )?user ([^\s(]+)'
     key: user
 
   # block device: "dev sdb,"
