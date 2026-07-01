@@ -27,6 +27,19 @@
 > 따라서 **`categories.yaml` 을 바꾸면** 수신측의 `CATEGORY_KO`·`goldset.yaml`(검색 채점 기준)·`playbook.yaml`(원인·대처 지식)도
 > **반드시 같이 손봐야 한다**(카테고리가 서로 맞물려 있음).
 
+### `config/fields.yaml` — 필드 추출 규칙 ⭐
+
+로그 본문에서 구조화 필드(`pid`, `user`, `dev`, `unit` …)를 뽑는 규칙이다. 예전에는 소스 코드에
+하드코딩돼 있었으나, 이제 이 파일에서 정의한다 — **코드 변경·재빌드 없이** 규칙을 추가할 수 있다(`categories.yaml`과 동일 방식).
+
+- `fields:` — 각 규칙은 정규식 캡처그룹 1을 값으로 저장한다(`numeric: true` 면 정수로).
+- `settings.logfmt: true` — 메시지 안의 임의 `key=value`(예: `site=naver.com code=200 duration=1.5`)를 자동 필드로 승격.
+- `settings.json: true` — 메시지 안의 JSON 객체(`{...}`) 최상위 스칼라를 자동 필드로 승격.
+- `settings.allow` / `settings.max_auto_fields` — 자동 승격 필드의 **화이트리스트**와 **개수 상한**. auditd 처럼 `key=value` 가 폭주하는 로그를 막는 안전장치다(비우면 상한까지 전부 허용).
+
+추출된 필드는 dedup·수신측 검색 라벨로 쓰이며, `categories.yaml`의 `logger:` 조건도 여기서 뽑은 `logger` 필드를 참조한다.
+파일이 없거나 깨지면 에이전트는 기존 내장(builtin) 추출기 6종으로 자동 fallback 한다.
+
 ---
 
 ## 전체 흐름
@@ -39,7 +52,7 @@
          │
          ▼
    [log_parser 에이전트]
-   Vector 수집 → 정규화 → 중복제거 → Envelope 조립
+   Vector 수집(멀티라인 병합·노이즈 필터) → 정규화(심각도·카테고리·필드) → 중복제거 → Envelope 조립
          │
          │  POST /ingest
          │  Authorization: Bearer <TOKEN>
@@ -69,7 +82,7 @@ flowchart TD
         AU["auth.log"]
     end
 
-    VEC["Vector (자식 프로세스)"]
+    VEC["Vector (자식 프로세스)<br/>멀티라인 병합 · 노이즈 필터"]
 
     subgraph AGENT["log_parser 에이전트"]
         V["pipeline<br/>Vector 이벤트 수신"]
@@ -104,6 +117,8 @@ flowchart LR
     C -->|Envelope 반환| IN
     IN -->|"Envelope · 시스템 상태"| RCV
 ```
+
+> **Vector 수집 단계 (자동 생성 `vector.toml`)** — 파일 소스(syslog·auth)는 타임스탬프 헤더로 시작하는 줄을 새 이벤트로 보고, 헤더 없는 후속 줄(자바 스택트레이스·커널 콜트레이스)을 **한 이벤트로 병합**한다(multiline). 이어서 route/소켓으로 넘어가기 전에 **노이즈 필터(drop_noise)** 가 잡음 로그(기본: journald debug)를 버려 Rust 부하·전송량을 줄인다. 버려진 원본이 필요하면 pull API(`/trigger-sos`·`/stat`)로 회수할 수 있다. 이 설정은 distro 감지 결과로 에이전트가 **자동 생성**하므로 직접 편집하지 않는다.
 
 ---
 
@@ -468,6 +483,10 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 카테고리 추가: `/etc/log_parser/categories.yaml` 수정 후 에이전트 재시작으로 코드 변경 없이 적용됩니다.
 
 > **program 조건 (선택 필드)** — 규칙에 `program: sshd` 처럼 syslog 헤더의 program(태그)을 명시하면 **그 프로그램의 로그일 때만** 패턴을 적용합니다. 본문 문구가 같아도 출처가 다른 로그(예: sshd 세션 vs cron 세션)를 가르기 위함입니다. 미설정 규칙은 기존처럼 본문만으로 매칭합니다.
+>
+> **logger 조건 (선택 필드)** — 규칙에 `logger: '정규식'` 을 지정하면 `fields.yaml`이 뽑은 `logger` 필드가 그 정규식과 맞을 때만 적용합니다. 앱 로그를 로거(클래스) 이름으로 분류할 때 씁니다(예: `parametacorp.*Scrap` → `sa-scrap`). `settings.logfmt`/`json` 으로 `logger=` 또는 `{"logger":...}` 가 추출돼야 동작합니다.
+>
+> **성능** — 순수 문자열 패턴은 내부적으로 aho-corasick 멀티패턴 매칭으로 한 번에 스캔하고, 실제 정규식만 개별 평가합니다. 규칙이 수백 개로 늘어도 분류 속도가 유지됩니다(동작·순서는 동일).
 
 ---
 
@@ -751,6 +770,9 @@ cargo build --release
 # 디렉터리 준비
 mkdir -p /run/log_parser /var/lib/log_parser/spool/new /var/lib/log_parser/spool/retry /etc/log_parser
 
+# 분류·필드 규칙 배치 (기본 경로: /etc/log_parser/)
+cp config/categories.yaml config/fields.yaml /etc/log_parser/
+
 # 환경변수 설정
 cp config/.env.example config/.env   # 토큰 값 입력
 
@@ -772,7 +794,8 @@ kill -TERM <PID>
 | `FLUSH_INBOUND_TOKEN` | `/flush` · `/drain-spool` · `/drain-status` 토큰 | **필수** (미설정 시 기동 거부) |
 | `STAT_INBOUND_TOKEN` | `/stat` 호출 토큰 | **필수** (미설정 시 기동 거부) |
 | `SOS_INBOUND_TOKEN` | `/trigger-sos` 호출 토큰 | **필수** (미설정 시 기동 거부) |
-| `CATEGORIES_PATH` | categories.yaml 경로 | 선택 |
+| `CATEGORIES_PATH` | categories.yaml 경로 (기본 `/etc/log_parser/categories.yaml`) | 선택 |
+| `FIELDS_PATH` | fields.yaml 경로 (기본 `/etc/log_parser/fields.yaml`) | 선택 |
 | `RUST_LOG` | 로그 레벨 (`info` / `debug` / `warn`) | 선택 |
 
 ---
@@ -787,7 +810,8 @@ log_parser/
 │   ├── agent_docker.yaml       # Docker 실행용 설정
 │   ├── agent_test.yaml         # 테스트용 설정
 │   ├── categories.yaml         # 로그 카테고리 분류 규칙
-│   ├── vector.toml             # Vector 파이프라인 설정
+│   ├── fields.yaml             # 필드 추출 규칙 (logfmt/json 자동파싱 포함)
+│   ├── vector.toml             # Vector 파이프라인 설정 (멀티라인·노이즈 필터)
 │   └── .env.example            # 환경변수 템플릿
 ├── examples/                   # envelope 응답 샘플 (JSON)
 ├── docs/                       # 내부 설계 문서
