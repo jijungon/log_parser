@@ -133,7 +133,7 @@ pub async fn run_pipeline(
                         .or_insert_with(|| serde_json::Value::String(ev.host.clone()));
                 }
                 let severity  = crate::normalize::severity::finalize(&ev.log_parser_severity, &raw);
-                let category  = categories.categorize(&raw);
+                let category  = categories.categorize_with_fields(&raw, &fields);
 
                 let fp = {
                     use std::hash::Hasher as _;

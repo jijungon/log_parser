@@ -53,6 +53,8 @@ hostname = "0.4"
 # regex / pattern matching
 regex = "1"
 once_cell = "1"
+# 멀티패턴 리터럴 매칭 (categories 분류 가속)
+aho-corasick = "1"
 
 # constant-time byte comparison (타이밍 오라클 방지)
 subtle = "2"

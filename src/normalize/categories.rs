@@ -1,6 +1,9 @@
+use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{Context, Result};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
+use serde_json::Value;
+use std::collections::HashMap;
 use tracing::info;
 
 #[derive(Deserialize)]
@@ -15,63 +18,158 @@ struct Entry {
     /// 선택: syslog program(태그) 조건. 설정 시 그 program 일 때만 패턴 적용.
     #[serde(default)]
     program: Option<String>,
+    /// 선택: 추출된 `logger` 필드 조건(정규식). 설정 시 그 logger 일 때만 패턴 적용.
+    /// 앱 로그 분류(예: c.parametacorp...Scrap → sa-scrap)에 사용. (Promtail match 단계 대응)
+    #[serde(default)]
+    logger: Option<String>,
+}
+
+/// 패턴 매칭 방식. 메타문자 없는 순수 리터럴은 aho-corasick 로 한 번에 스캔하고,
+/// 진짜 정규식만 개별 regex 로 평가한다.
+enum Matcher {
+    /// aho-corasick 패턴 인덱스
+    Literal(usize),
+    Regex(Regex),
 }
 
 struct Rule {
-    re: Regex,
+    matcher: Matcher,
     program: Option<String>,
+    logger: Option<Regex>,
     category: String,
 }
 
 pub struct CategoryMatcher {
     rules: Vec<Rule>,
+    /// 리터럴 패턴 전용 멀티패턴 오토마톤 (인덱스 = Matcher::Literal(idx))
+    ac: Option<AhoCorasick>,
+    literal_count: usize,
+}
+
+/// 정규식 메타문자가 하나도 없으면 순수 리터럴로 간주 (case-insensitive 부분일치와 동일).
+fn is_literal(pattern: &str) -> bool {
+    !pattern.is_empty() && !pattern.bytes().any(|b| {
+        matches!(
+            b,
+            b'\\' | b'.' | b'^' | b'$' | b'*' | b'+' | b'?'
+                | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|'
+        )
+    })
 }
 
 impl CategoryMatcher {
     pub fn load(path: &str) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("categories.yaml 읽기 실패: {path}"))?;
-        let rules = Self::build_rules(&text)?;
-        info!(rules = rules.len(), path, "categories.yaml 로드 완료");
-        Ok(Self { rules })
+        let me = Self::build(&text)?;
+        info!(
+            rules = me.rules.len(),
+            literals = me.literal_count,
+            path,
+            "categories.yaml 로드 완료"
+        );
+        Ok(me)
     }
 
-    /// yaml 텍스트 → 규칙 목록. load() 와 회귀 테스트가 공유한다.
-    fn build_rules(text: &str) -> Result<Vec<Rule>> {
+    /// yaml 텍스트 → CategoryMatcher. load() 와 회귀 테스트가 공유한다.
+    fn build(text: &str) -> Result<Self> {
         let file: CategoriesFile =
             serde_yaml::from_str(text).context("categories.yaml 파싱 실패")?;
 
-        let mut rules = Vec::new();
+        let mut rules = Vec::with_capacity(file.categories.len());
+        let mut literals: Vec<String> = Vec::new();
+
         for entry in file.categories {
-            let pattern = if entry.pattern.is_empty() {
-                "(?s).*".to_string() // fallback: match everything
-            } else {
-                entry.pattern.clone()
+            let logger = match &entry.logger {
+                Some(p) => Some(
+                    RegexBuilder::new(p)
+                        .case_insensitive(true)
+                        .build()
+                        .with_context(|| format!("logger 패턴 컴파일 실패: {p}"))?,
+                ),
+                None => None,
             };
 
-            let re = RegexBuilder::new(&pattern)
-                .case_insensitive(true)
-                .build()
-                .with_context(|| format!("카테고리 패턴 컴파일 실패: {}", entry.pattern))?;
+            let matcher = if is_literal(&entry.pattern) {
+                let idx = literals.len();
+                literals.push(entry.pattern.clone());
+                Matcher::Literal(idx)
+            } else {
+                let pattern = if entry.pattern.is_empty() {
+                    "(?s).*".to_string() // fallback: match everything
+                } else {
+                    entry.pattern.clone()
+                };
+                let re = RegexBuilder::new(&pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .with_context(|| format!("카테고리 패턴 컴파일 실패: {}", entry.pattern))?;
+                Matcher::Regex(re)
+            };
 
             rules.push(Rule {
-                re,
+                matcher,
                 program: entry.program,
+                logger,
                 category: entry.category,
             });
         }
-        Ok(rules)
+
+        let literal_count = literals.len();
+        let ac = if literals.is_empty() {
+            None
+        } else {
+            Some(
+                AhoCorasick::builder()
+                    .ascii_case_insensitive(true)
+                    .match_kind(MatchKind::Standard)
+                    .build(&literals)
+                    .context("aho-corasick 빌드 실패")?,
+            )
+        };
+
+        Ok(Self {
+            rules,
+            ac,
+            literal_count,
+        })
     }
 
     /// categories.yaml 없을 때 fallback — 모든 이벤트를 system.general로 분류
     pub fn fallback() -> Self {
-        Self { rules: vec![] }
+        Self {
+            rules: vec![],
+            ac: None,
+            literal_count: 0,
+        }
     }
 
-    /// First-match-wins. `program` 조건이 있는 규칙은 해당 program 일 때만 적용한다.
-    /// (헤더 없는 줄은 program=None → program 조건 규칙은 자동으로 건너뜀)
+    /// 필드 없이 분류 (하위호환 래퍼, 테스트·외부용).
+    #[allow(dead_code)]
     pub fn categorize<'a>(&'a self, message: &str) -> &'a str {
+        static EMPTY: once_cell::sync::Lazy<HashMap<String, Value>> =
+            once_cell::sync::Lazy::new(HashMap::new);
+        self.categorize_with_fields(message, &EMPTY)
+    }
+
+    /// First-match-wins. `program` 조건이 있는 규칙은 해당 program 일 때만,
+    /// `logger` 조건이 있는 규칙은 fields["logger"] 가 매칭될 때만 적용한다.
+    pub fn categorize_with_fields<'a>(
+        &'a self,
+        message: &str,
+        fields: &HashMap<String, Value>,
+    ) -> &'a str {
+        // 리터럴 패턴들의 존재 여부를 단일 스캔으로 계산 (aho-corasick).
+        let present: Option<Vec<bool>> = self.ac.as_ref().map(|ac| {
+            let mut v = vec![false; self.literal_count];
+            for m in ac.find_overlapping_iter(message) {
+                v[m.pattern().as_usize()] = true;
+            }
+            v
+        });
+
         let prog = super::tokens::syslog_program(message);
+
         for rule in &self.rules {
             if let Some(want) = &rule.program {
                 match prog {
@@ -79,7 +177,17 @@ impl CategoryMatcher {
                     _ => continue,
                 }
             }
-            if rule.re.is_match(message) {
+            if let Some(re) = &rule.logger {
+                match fields.get("logger").and_then(|v| v.as_str()) {
+                    Some(l) if re.is_match(l) => {}
+                    _ => continue,
+                }
+            }
+            let hit = match &rule.matcher {
+                Matcher::Literal(id) => present.as_ref().map(|p| p[*id]).unwrap_or(false),
+                Matcher::Regex(re) => re.is_match(message),
+            };
+            if hit {
                 return rule.category.as_str();
             }
         }
@@ -91,16 +199,24 @@ impl CategoryMatcher {
 mod tests {
     use super::*;
 
+    /// 정규식 규칙만으로 매처 구성 (ac 미사용 경로 테스트).
     fn matcher(rules: &[(&str, &str)]) -> CategoryMatcher {
         let compiled = rules
             .iter()
             .map(|(pat, cat)| Rule {
-                re: RegexBuilder::new(pat).case_insensitive(true).build().unwrap(),
+                matcher: Matcher::Regex(
+                    RegexBuilder::new(pat).case_insensitive(true).build().unwrap(),
+                ),
                 program: None,
+                logger: None,
                 category: cat.to_string(),
             })
             .collect();
-        CategoryMatcher { rules: compiled }
+        CategoryMatcher {
+            rules: compiled,
+            ac: None,
+            literal_count: 0,
+        }
     }
 
     #[test]
@@ -137,32 +253,84 @@ mod tests {
 
     #[test]
     fn program_condition_gates_match() {
-        // program=sshd 조건: sshd 일 때만 auth.event, 다른 program 이면 건너뜀
         let m = CategoryMatcher {
             rules: vec![Rule {
-                re: RegexBuilder::new("Accepted publickey").case_insensitive(true).build().unwrap(),
+                matcher: Matcher::Regex(
+                    RegexBuilder::new("Accepted publickey").case_insensitive(true).build().unwrap(),
+                ),
                 program: Some("sshd".into()),
+                logger: None,
                 category: "auth.event".into(),
             }],
+            ac: None,
+            literal_count: 0,
         };
         assert_eq!(
             m.categorize("Jun 14 23:54:52 host sshd[1]: Accepted publickey for root"),
             "auth.event"
         );
-        // 같은 문구라도 program 이 sshd 가 아니면 적용 안 됨
         assert_eq!(
             m.categorize("Jun 14 23:54:52 host myapp[1]: Accepted publickey debug"),
             "system.general"
         );
     }
 
+    #[test]
+    fn logger_condition_gates_match() {
+        // logger 필드가 지정 정규식과 맞을 때만 분류
+        let m = CategoryMatcher::build(
+            r#"
+categories:
+  - pattern: "Scrap"
+    category: sa-scrap
+    logger: 'parametacorp.*Scrap'
+  - pattern: ""
+    category: system.general
+"#,
+        )
+        .unwrap();
+
+        let mut with_logger = HashMap::new();
+        with_logger.insert(
+            "logger".to_string(),
+            Value::String("c.parametacorp.cexks.data.model.Scrap".into()),
+        );
+        assert_eq!(m.categorize_with_fields("Scrap done site=x", &with_logger), "sa-scrap");
+
+        // logger 없거나 불일치 → 분류 안 됨(fallback)
+        assert_eq!(m.categorize("Scrap done site=x"), "system.general");
+        let mut other = HashMap::new();
+        other.insert("logger".to_string(), Value::String("com.other.Thing".into()));
+        assert_eq!(m.categorize_with_fields("Scrap done", &other), "system.general");
+    }
+
+    #[test]
+    fn literal_and_regex_mix_via_aho_corasick() {
+        // 리터럴("Out of memory")은 aho-corasick, 정규식("EDAC MC|Hardware Error")은 regex 경로
+        let m = CategoryMatcher::build(
+            r#"
+categories:
+  - pattern: "Out of memory: Killed"
+    category: kernel.oom
+  - pattern: "EDAC MC|Hardware Error"
+    category: hw.mce
+  - pattern: "avc: denied"
+    category: selinux.denial
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.literal_count, 2); // "Out of memory..." + "avc: denied"
+        assert_eq!(m.categorize("Out of memory: Killed process 1 (x)"), "kernel.oom");
+        assert_eq!(m.categorize("Hardware Error detected"), "hw.mce");
+        assert_eq!(m.categorize("audit: avc: denied for pid 1"), "selinux.denial");
+        assert_eq!(m.categorize("nothing here"), "system.general");
+    }
+
     /// 실제 config/categories.yaml 로 (실로그 → 기대 카테고리) 회귀 검증.
-    /// 규칙을 바꿨을 때 기존 분류가 깨지면 여기서 실패한다.
     #[test]
     fn regression_against_real_categories_yaml() {
         let yaml = include_str!("../../config/categories.yaml");
-        let rules = CategoryMatcher::build_rules(yaml).expect("실제 categories.yaml 파싱/컴파일");
-        let m = CategoryMatcher { rules };
+        let m = CategoryMatcher::build(yaml).expect("실제 categories.yaml 파싱/컴파일");
 
         let cases: &[(&str, &str)] = &[
             ("Jun 14 23:54:52 host sshd[3211286]: Accepted publickey for root from 10.255.10.33 port 49268 ssh2: RSA SHA256:abc", "auth.event"),
@@ -179,7 +347,6 @@ mod tests {
             ("May  8 08:41:10 db-prod-03 kernel: EXT4-fs error (device sdb1): ext4_find_entry:1455", "fs.error"),
             ("May  8 10:14:03 db-prod-03 systemd[1]: app-worker.service: Start request repeated too quickly", "systemd.restart_loop"),
             ("Jun 15 00:00:07 host systemd[1]: Starting Daily apt download activities...", "system.general"),
-            // program 앵커: sshd 가 아닌 program 의 'Accepted publickey' 문구는 auth.event 로 안 감
             ("Jun 15 00:00:00 host myapp[1]: Accepted publickey debug message", "system.general"),
         ];
 

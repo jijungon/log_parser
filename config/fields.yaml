@@ -1,0 +1,63 @@
+# log_parser 필드 추출 규칙
+# 메시지 본문(syslog 헤더 제거 후)에서 구조화 필드를 뽑는다.
+# 새 필드 추가: 이 파일 수정 + agent 재시작. 코드 변경 불필요(categories.yaml 과 동일 방식).
+#
+# 각 항목:
+#   pattern : 캡처 그룹 1을 값으로 쓰는 정규식(대소문자 구분). \d \S 등 사용 가능.
+#   key     : 저장할 필드 이름.
+#   numeric : true 면 값을 정수로 저장(파싱 실패 시 그 필드는 생략).
+#
+# 같은 key 는 위에서부터 first-match-wins (구체적 규칙을 위에 둘 것).
+
+fields:
+  # OOM killer: "Killed process 2481 (java)"
+  - pattern: '[Kk]illed process (\d+)'
+    key: pid
+    numeric: true
+
+  # SSH / PAM: "for user root" / "for invalid user admin"
+  - pattern: 'for (?:invalid )?user (\S+)'
+    key: user
+
+  # block device: "dev sdb,"
+  - pattern: '\bdev (\S+?)(?:[,\s]|$)'
+    key: dev
+
+  # systemd unit: "app-worker.service: ..."
+  - pattern: '^(\S+\.(?:service|socket|mount|target|timer))\b'
+    key: unit
+
+  # key=value 스타일 pid / user (logfmt 자동파싱과 별개로 우선 확보)
+  - pattern: '\bpid=(\d+)'
+    key: pid
+    numeric: true
+
+  - pattern: '\buser=(\S+)'
+    key: user
+
+# 자동 파싱 설정 (Promtail logfmt 단계 대응)
+settings:
+  # 메시지 안의 임의 key=value 를 필드로 승격 (예: site=naver.com code=200)
+  logfmt: true
+  # 메시지 안의 JSON 객체({...}) 최상위 스칼라를 필드로 승격
+  json: true
+  # 자동 승격 최대 개수 — auditd 처럼 key=value 폭주하는 로그 방어
+  max_auto_fields: 20
+  # 자동 승격 허용 키(화이트리스트). 비우면 전부 허용(상한까지).
+  # 시스템 로그의 잡음 필드(uid/gid/a0/comm 등)를 막기 위해 앱 로그에서 쓰는 키만 승격.
+  allow:
+    - site
+    - code
+    - duration
+    - latency
+    - status
+    - method
+    - path
+    - port
+    - elapsed
+    - bytes
+    - count
+    - error
+    - level
+    - logger
+    - thread

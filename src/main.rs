@@ -14,6 +14,7 @@ use tracing::info;
 
 const DEFAULT_CONFIG: &str = "/etc/log_parser/agent.yaml";
 pub const DEFAULT_CATEGORIES: &str = "/etc/log_parser/categories.yaml";
+pub const DEFAULT_FIELDS: &str = "/etc/log_parser/fields.yaml";
 const RUNTIME_VECTOR_CONFIG: &str = "/run/log_parser/vector.toml";
 
 #[tokio::main]
@@ -30,6 +31,8 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| DEFAULT_CONFIG.to_string());
     let categories_path = std::env::var("CATEGORIES_PATH")
         .unwrap_or_else(|_| DEFAULT_CATEGORIES.to_string());
+    let fields_path = std::env::var("FIELDS_PATH")
+        .unwrap_or_else(|_| DEFAULT_FIELDS.to_string());
 
     info!(config = %config_path, "log_parser 시작");
 
@@ -200,6 +203,15 @@ async fn main() -> Result<()> {
             tracing::warn!("categories.yaml 로드 실패 ({e}) — fallback 사용");
             normalize::categories::CategoryMatcher::fallback()
         });
+
+    // 필드 추출기: config 기반 전역 인스턴스 초기화 (실패 시 builtin fallback).
+    // 이후 extract_fields() 자유함수가 이 인스턴스를 사용한다.
+    let field_extractor = normalize::fields::FieldExtractor::load(&fields_path)
+        .unwrap_or_else(|e| {
+            tracing::warn!("fields.yaml 로드 실패 ({e}) — builtin 추출기 사용");
+            normalize::fields::FieldExtractor::builtin()
+        });
+    normalize::fields::init_global(field_extractor);
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(cfg.pipeline.channel_capacity);
     let (flush_tx, flush_rx) = tokio::sync::mpsc::channel::<coordinator::FlushSignal>(4);

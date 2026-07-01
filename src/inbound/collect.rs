@@ -1037,7 +1037,7 @@ pub async fn collect_logs(log_paths: &[String]) -> Value {
                         h.finish()
                     };
 
-                    let category = categories.categorize(&line).to_string();
+                    let category = categories.categorize_with_fields(&line, &fields_map).to_string();
 
                     if let Some(emitted) = window.push(
                         fingerprint, source.clone(), sev.to_string(),

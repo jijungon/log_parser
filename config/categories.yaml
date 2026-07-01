@@ -193,6 +193,14 @@ categories:
   - pattern: "transmit queue timed out"
     category: net.watchdog
 
+  # ── 앱 로그 분류 예시 (logger 필드 조건) ──────────────────────────────────
+  # logger: 는 추출된 fields["logger"] 가 정규식과 맞을 때만 규칙을 적용한다.
+  # (fields.yaml 의 logfmt/json 이 logger= 또는 {"logger":...} 를 뽑아줘야 동작)
+  # 아래는 예시 — 실제 앱 로그 수집을 붙이면 주석 해제:
+  # - pattern: "Scrap"
+  #   category: sa-scrap
+  #   logger: 'parametacorp.*Scrap'
+
   # ── fallback ──────────────────────────────────────────────────────────────
   - pattern: ""
     category: system.general
