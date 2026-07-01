@@ -11,10 +11,12 @@ services:
       STAT_INBOUND_TOKEN: ${STAT_INBOUND_TOKEN:-stat-secret}
       SOS_INBOUND_TOKEN: ${SOS_INBOUND_TOKEN:-sos-secret}
       CATEGORIES_PATH: /etc/log_parser/categories.yaml
+      FIELDS_PATH: /etc/log_parser/fields.yaml
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - ./config/agent_docker.yaml:/etc/log_parser/agent.yaml:ro
       - ./config/categories.yaml:/etc/log_parser/categories.yaml:ro
+      - ./config/fields.yaml:/etc/log_parser/fields.yaml:ro
       - /app/vector:/app/vector:ro          # Vector 바이너리
       - ./data/spool:/var/lib/log_parser    # spool WAL
       - /var/log:/var/log:ro                # 호스트 syslog, auth.log 등
