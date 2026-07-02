@@ -4,6 +4,8 @@
 
 **이 문서의 대상**: log_parser가 보내는 데이터를 받는 서버를 개발·운영하는 팀
 
+> 최근 변경 내역은 맨 아래 [변경 이력](#변경-이력) 참조.
+
 ---
 
 ## ⭐ 가장 중요한 파일 (반드시 직접 관리)
@@ -119,6 +121,54 @@ flowchart LR
 ```
 
 > **Vector 수집 단계 (자동 생성 `vector.toml`)** — 파일 소스(syslog·auth)는 타임스탬프 헤더로 시작하는 줄을 새 이벤트로 보고, 헤더 없는 후속 줄(자바 스택트레이스·커널 콜트레이스)을 **한 이벤트로 병합**한다(multiline). 이어서 route/소켓으로 넘어가기 전에 **노이즈 필터(drop_noise)** 가 잡음 로그(기본: journald debug)를 버려 Rust 부하·전송량을 줄인다. 버려진 원본이 필요하면 pull API(`/trigger-sos`·`/stat`)로 회수할 수 있다. 이 설정은 distro 감지 결과로 에이전트가 **자동 생성**하므로 직접 편집하지 않는다.
+
+### 로그 한 줄이 처리되는 과정 (단계별)
+
+**여러 겹 정수기 필터**를 떠올리면 쉽다 — 지저분한 원본 로그가 단계를 지날 때마다 걸러지고 라벨이 붙어, 마지막엔 깔끔하게 정리된 한 건으로 나온다. 각 단계가 **무슨 일을 하고 무엇을 만들어내는지**를 한눈에 정리한다. (기능이 계속 늘어나므로 "어디서 무슨 일을 하는지"의 단일 기준표로 둔다.)
+
+```mermaid
+flowchart TD
+    RAW["원본 로그 줄<br/>(syslog 헤더 + 메시지)"]
+    subgraph VECTOR["① Vector 수집"]
+        ML["multiline 병합"]
+        DN["drop_noise 필터"]
+    end
+    subgraph NORM["log_parser normalize (Rust)"]
+        TK["② 정규화 tokens.rs"]
+        SV["③ 심각도 severity"]
+        CT["④ 분류 categories.yaml"]
+        FD["⑤ 필드추출 fields.yaml"]
+    end
+    DP["⑥ 중복 묶기 dedup"]
+    EV["⑦ 조립·전송 coordinator"]
+    OUT["수신측 전송"]
+
+    RAW --> ML --> DN --> TK --> SV --> CT --> FD --> DP --> EV --> OUT
+```
+
+| 단계 | 하는 일 (쉽게) | 자세히 | 결과물 |
+|------|---------------|--------|--------|
+| **① Vector 수집** | 로그를 읽어오면서, 여러 줄로 쪼개진 로그(자바 에러 등)를 **한 덩어리로 붙이고** 쓸모없는 잡음은 **버린다** | 타임스탬프 헤더로 이벤트 경계 판정 → 후속 줄 병합(multiline), `drop_noise`로 잡음(기본 journald debug) 폐기 | 깔끔해진 로그 이벤트 |
+| **② 정규화** (`tokens.rs`) | 로그마다 다른 부분(IP·숫자·날짜·경로)을 `<IP4>`·`<NUM>` 같은 **자리표시자로 바꿔**, 같은 종류 로그가 같은 모양이 되게 한다 | syslog 헤더(RFC3164·ISO) strip 후 가변 토큰 치환(UUID·IP·경로·숫자 등) | 정규 문장 `template` + 지문 `fingerprint` |
+| **③ 심각도** (`severity`) | 이 로그가 **얼마나 급한지** 판정 | PRIORITY·키워드로 매핑 | `critical`/`error`/`warn`/`info` |
+| **④ 분류** (`categories.yaml`) | 로그가 **무슨 사건인지 이름표**를 붙인다 (메모리 부족·로그인 실패 등) | aho-corasick으로 후보만 추린 뒤 정규식 first-match, `program`/`logger` 게이트 | 카테고리 (예: `kernel.oom`) |
+| **⑤ 필드 추출** (`fields.yaml`) | 로그에서 **누가·무엇을**(사용자·PID·서비스명) 꺼내 따로 정리 | 정규식 캡처(`pid`·`user`·`dev`·`unit`) + `logfmt`/`json` 자동 승격 | `fields` (예: `{user: root}`) |
+| **⑥ 중복 묶기** (`dedup`) | 30초 안에 **똑같은 로그가 여러 번** 오면 하나로 합치고 횟수만 센다 | 같은 `fingerprint` 병합, 발생 수 누적, 원본 샘플 보존 | 묶인 `DedupEvent` (`count` 포함) |
+| **⑦ 조립·전송** (`coordinator`) | 30분치를 모아 **한 봉투(Envelope)로 싸서** 수신 서버로 보낸다 | 카테고리·심각도 집계, 사이클·헤더 메타 부착 | `Envelope` → HTTP POST |
+
+> 순서: **① 수집 → ②~⑤ 정규화 → ⑥ 중복 묶기 → ⑦ 조립·전송**. 최종 산출물 `DedupEvent`의 필드 정의는 [DedupEvent 스키마](#dedupevent-스키마), 카테고리 목록은 [Category 분류표](#category-분류표) 참조.
+
+#### ④ 분류 · ⑤ 필드 추출 · ⑥ 중복 묶기 — 뭐가 다른가
+
+셋 다 로그를 "처리"하지만 **목적이 다르다.** 로그 한 줄 `Out of memory: Killed process 2481 (java)` 로 비교하면 한눈에 갈린다.
+
+| 단계 | 답하는 질문 | 이 예시에서 하는 일 |
+|------|------------|----------------------|
+| **④ 분류** | "이게 **무슨 종류** 사건이야?" | `kernel.oom`(메모리 부족)이라는 **이름표**를 붙임 |
+| **⑤ 필드 추출** | "그 안에 **구체적 값**이 뭐야?" | `pid=2481` 같은 **속 알맹이 값**을 뽑음 |
+| **⑥ 중복 묶기** | "그게 **몇 번** 일어났어?" | 같은 로그가 5번 오면 → **1건 + `count=5`** 로 압축 |
+
+한마디로 **④는 종류 이름표, ⑤는 속 알맹이, ⑥은 반복 횟수**를 다룬다. ④·⑤는 로그 하나를 **풍부하게 만드는**(라벨·값 붙이기) 단계고, ⑥은 여러 개를 **줄이는**(합치기) 단계라는 점도 다르다.
 
 ---
 
@@ -784,6 +834,8 @@ set -a && source config/.env && set +a
 kill -TERM <PID>
 ```
 
+> **Docker로 실행 시** — `docker compose up -d` 를 쓰면 `docker-compose.yml` 이 `agent.yaml`·`categories.yaml`·`fields.yaml` 을 컨테이너의 `/etc/log_parser/` 로 볼륨 마운트한다(config 변경은 런타임 마운트라 **이미지 재빌드 불필요**, `down && up -d` 재기동만으로 반영). ⚠ **새 설정 파일을 추가하면 compose 볼륨에도 반드시 등록**해야 컨테이너가 읽는다 — 등록 누락 시 해당 파일은 builtin fallback으로 동작한다.
+
 ---
 
 ## 환경변수 요약
@@ -811,7 +863,7 @@ log_parser/
 │   ├── agent_test.yaml         # 테스트용 설정
 │   ├── categories.yaml         # 로그 카테고리 분류 규칙
 │   ├── fields.yaml             # 필드 추출 규칙 (logfmt/json 자동파싱 포함)
-│   ├── vector.toml             # Vector 파이프라인 설정 (멀티라인·노이즈 필터)
+│   ├── vector.toml             # ⚠ 참고용 스냅샷 — 실배포 설정은 vector_config.rs가 런타임 자동 생성
 │   └── .env.example            # 환경변수 템플릿
 ├── examples/                   # envelope 응답 샘플 (JSON)
 ├── docs/                       # 내부 설계 문서
@@ -835,3 +887,29 @@ log_parser/
 6. [src/coordinator/README.md](src/coordinator/README.md) → [src/transport/README.md](src/transport/README.md) — Cycle 조립·전송
 7. [src/inbound/README.md](src/inbound/README.md) — Pull API
 8. [examples/README.md](examples/README.md) — 실제 envelope 샘플
+
+---
+
+## 변경 이력
+
+> 최신 항목을 위에 추가한다.
+
+### 2026-07-01 — Promtail 파이프라인 벤치마킹
+
+Promtail(Grafana Loki의 수집 에이전트)이 *"날것의 로그를 그대로 보내지 않고 파이프라인 스테이지로 가공한 뒤 보낸다"* 는 방식을 벤치마킹해, **수집 단계의 정제 능력**을 끌어올렸다. 차용한 개념과 이 프로젝트의 구현 대응은 다음과 같다.
+
+| Promtail 개념 | 하는 일 | log_parser 구현 |
+|---------------|---------|-----------------|
+| **multiline** | 여러 줄 로그(자바 스택트레이스·커널 콜트레이스)를 한 덩어리로 묶음 | Vector `multiline` — 타임스탬프 헤더로 시작하는 줄을 새 이벤트로 보고 후속 줄 병합(`halt_before`) |
+| **drop** | 필요 없는 잡음 로그를 버려 저장·전송량 절감 | Vector `drop_noise` 필터(기본: journald debug 제거) |
+| **regex / logfmt / json** | 메시지에서 구조화 필드 추출 | `fields.yaml` — 정규식 캡처 + `logfmt`/`json` 자동 승격(allow 화이트리스트·개수 상한) |
+| **match** | 조건에 맞는 로그를 분류·라우팅 | `categories.yaml` — aho-corasick 리터럴 선별 후 정규식 first-match, `program`/`logger` 게이트 |
+
+**반영한 개선**
+
+- **설정 주도화** — 필드 추출을 소스 하드코딩에서 `fields.yaml` 로딩형으로 전환(코드 변경·재빌드 없이 규칙 추가).
+- **logfmt/JSON 자동 파싱** — 앱 로그의 `key=value`·JSON 객체를 필드로 승격(auditd 처럼 폭주하는 로그를 막는 allow 화이트리스트·개수 상한 포함).
+- **배포 완결** — `fields.yaml`을 컨테이너 `/etc/log_parser/`로 마운트하도록 `docker-compose.yml` 보강(신규 설정 파일 배치 누락 수정).
+- **user 필드 정밀화** — `session opened for user root(uid=0)` 로그에서 `(uid=0)` 꼬리표를 잘라 `root`로 정규화(값 파편화 방지). 하이픈·점 포함 계정명(`www-data`·`user.name`)은 보존.
+
+> 각 단계가 실제로 어떻게 이어지는지는 [전체 흐름](#전체-흐름)과 [로그 한 줄이 처리되는 과정](#로그-한-줄이-처리되는-과정-단계별) 참조.
