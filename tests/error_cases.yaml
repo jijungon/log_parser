@@ -13,8 +13,14 @@
 #   logs      : 주입할 원본 로그 메시지(헤더 제외 본문). categories.yaml 패턴을 포함해야 매칭됨
 #   question  : 챗봇(localhost:8000)에 물어볼 자연어 질문(한국어)
 #   expect_keywords : 챗봇 답변(analysis/remedy)에 이 중 하나라도 나오면 내용 OK (소문자 비교)
+#
+# ⚠ 분류는 categories.yaml 의 first-match-wins 라, 주입 라인이 의도한 카테고리보다
+#   위에 있는 넓은 패턴에 먼저 걸리지 않도록 주의(예: container.oom 은 "Out of memory: Killed"
+#   를 포함하면 kernel.oom 으로 먼저 잡힘). 추가 후 로컬 교차검증 필수.
+# system.general(fallback)은 특정 질문이 어려워 제외.
 
 cases:
+  # ── 커널 / 프로세스 ────────────────────────────────────────────────────────
   - category: kernel.oom
     program: kernel
     facility: kern.err
@@ -23,21 +29,63 @@ cases:
     question: "메모리 부족으로 죽은 프로세스 있어?"
     expect_keywords: ["메모리", "oom", "kill"]
 
-  - category: auth.bruteforce
-    program: sshd
-    facility: authpriv.info
+  - category: kernel.bug
+    program: kernel
+    facility: kern.err
     logs:
-      - "Failed password for invalid user admin from 203.0.113.7 port 51022 ssh2"
-    question: "누가 무차별로 로그인 시도한 흔적 있어?"
-    expect_keywords: ["무차별", "브루트", "brute", "침입", "시도"]
+      - "kernel BUG at mm/slub.c:305!"
+    question: "커널 내부 버그가 발생한 적 있어?"
+    expect_keywords: ["커널", "버그", "bug"]
 
-  - category: auth.event
-    program: sshd          # ← program 게이트: sshd 태그가 아니면 auth.event 로 분류 안 됨
-    facility: authpriv.info
+  - category: kernel.panic
+    program: kernel
+    facility: kern.emerg
     logs:
-      - "Accepted password for root from 203.0.113.7 port 51044 ssh2"
-    question: "정상적으로 로그인한 기록 보여줘"
-    expect_keywords: ["로그인", "인증", "성공", "세션"]
+      - "Kernel panic - not syncing: Fatal exception"
+    question: "커널 패닉으로 시스템이 멈춘 적 있어?"
+    expect_keywords: ["패닉", "panic", "멈춤", "정지"]
+
+  - category: process.crash
+    program: kernel
+    facility: kern.err
+    logs:
+      - "myapp[12345]: segfault at 7f3a ip 00007f3a sp 00007ffe error 4 in libc.so.6"
+    question: "프로세스가 비정상 종료(크래시)된 적 있어?"
+    expect_keywords: ["크래시", "세그", "segfault", "종료", "프로세스"]
+
+  # ── 파일시스템 ────────────────────────────────────────────────────────────
+  - category: fs.error
+    program: kernel
+    facility: kern.err
+    logs:
+      - "EXT4-fs error (device sda1): ext4_find_entry:1234: inode #2: comm ls: reading directory lblock 0"
+    question: "파일시스템 오류가 발생했어?"
+    expect_keywords: ["파일시스템", "디스크", "손상", "오류"]
+
+  - category: fs.readonly
+    program: kernel
+    facility: kern.err
+    logs:
+      - "EXT4-fs (sda1): Remounting filesystem read-only"
+    question: "파일시스템이 읽기전용으로 바뀐 적 있어?"
+    expect_keywords: ["읽기전용", "read-only", "쓰기", "기록"]
+
+  # ── 하드웨어 / 디스크 ──────────────────────────────────────────────────────
+  - category: hw.mce
+    program: kernel
+    facility: kern.err
+    logs:
+      - "mce: [Hardware Error]: Machine check events logged"
+    question: "하드웨어 오류가 감지됐어?"
+    expect_keywords: ["하드웨어", "hardware", "장비", "고장"]
+
+  - category: disk.smart_error
+    program: smartd
+    facility: daemon.err
+    logs:
+      - "Device: /dev/sda, SMART Prefailure Attribute: 5 Reallocated_Sector_Ct Threshold Exceeded"
+    question: "디스크 수명(SMART) 경고가 있어?"
+    expect_keywords: ["디스크", "smart", "수명", "교체"]
 
   - category: disk.io_error
     program: kernel
@@ -47,6 +95,32 @@ cases:
     question: "디스크 입출력 오류 났어?"
     expect_keywords: ["디스크", "입출력", "i/o", "저장"]
 
+  - category: disk.link_error
+    program: kernel
+    facility: kern.err
+    logs:
+      - "ata3: hard resetting link"
+    question: "디스크 연결(링크) 오류가 있었어?"
+    expect_keywords: ["연결", "링크", "케이블", "접촉"]
+
+  # ── 네트워크 ──────────────────────────────────────────────────────────────
+  - category: net.error
+    program: kernel
+    facility: kern.warning
+    logs:
+      - "nf_conntrack: table full, dropping packet"
+    question: "네트워크 오류(연결/소켓/conntrack)가 있었어?"
+    expect_keywords: ["네트워크", "연결", "소켓", "통신"]
+
+  - category: net.watchdog
+    program: kernel
+    facility: kern.err
+    logs:
+      - "NETDEV WATCHDOG: eth0 (e1000e): transmit queue 0 timed out"
+    question: "네트워크 카드 워치독(전송 큐 멈춤)이 발생했어?"
+    expect_keywords: ["워치독", "watchdog", "전송", "랜카드", "네트워크"]
+
+  # ── systemd / 서비스 ──────────────────────────────────────────────────────
   - category: systemd.unit_failure
     program: systemd
     facility: daemon.err
@@ -55,10 +129,69 @@ cases:
     question: "서비스 시작에 실패한 거 있어?"
     expect_keywords: ["서비스", "시작", "실패", "유닛"]
 
-  - category: fs.error
+  - category: systemd.restart_loop
+    program: systemd
+    facility: daemon.err
+    logs:
+      - "app-worker.service: Start request repeated too quickly."
+    question: "서비스가 반복적으로 재시작(재시작 루프)된 적 있어?"
+    expect_keywords: ["재시작", "반복", "루프", "restart"]
+
+  # ── 인증 / 세션 ───────────────────────────────────────────────────────────
+  - category: auth.bruteforce
+    program: sshd
+    facility: authpriv.info
+    logs:
+      - "Failed password for invalid user admin from 203.0.113.7 port 51022 ssh2"
+    question: "누가 무차별로 로그인 시도한 흔적 있어?"
+    expect_keywords: ["무차별", "브루트", "brute", "침입", "시도"]
+
+  - category: auth.failure
+    program: sshd
+    facility: authpriv.info
+    logs:
+      - "Failed password for root from 198.51.100.9 port 40122 ssh2"
+    question: "로그인 인증에 실패한 기록 있어?"
+    expect_keywords: ["인증", "실패", "로그인", "암호"]
+
+  - category: auth.event
+    program: sshd          # ← program 게이트: sshd 태그가 아니면 auth.event 로 분류 안 됨
+    facility: authpriv.info
+    logs:
+      - "Accepted password for root from 203.0.113.7 port 51044 ssh2"
+    question: "정상적으로 로그인한 기록 보여줘"
+    expect_keywords: ["로그인", "인증", "성공", "세션"]
+
+  - category: session.activity
+    program: systemd-logind
+    facility: auth.info
+    logs:
+      - "New session 4521 of user deploy."
+    question: "세션이 새로 열리거나 닫힌 활동 있어?"
+    expect_keywords: ["세션", "session", "열림", "활동"]
+
+  # ── 시간 / 컨테이너 / 보안 ─────────────────────────────────────────────────
+  - category: ntp.drift
+    program: chronyd
+    facility: daemon.info
+    logs:
+      - "System clock wrong by 4.521 seconds, adjusting"
+    question: "시스템 시계가 틀어진(시간 동기화 오류) 적 있어?"
+    expect_keywords: ["시간", "시계", "동기화", "ntp"]
+
+  - category: container.oom
     program: kernel
     facility: kern.err
     logs:
-      - "EXT4-fs error (device sda1): ext4_find_entry:1234: inode #2: comm ls: reading directory lblock 0"
-    question: "파일시스템 오류가 발생했어?"
-    expect_keywords: ["파일시스템", "디스크", "손상", "오류"]
+      # "Out of memory: Killed" 를 포함하지 않도록 주의(포함 시 kernel.oom 로 먼저 잡힘)
+      - "Memory cgroup out of memory: Task in /docker/9a3b killed as a result of limit of /docker/9a3b"
+    question: "컨테이너가 메모리 한도 초과로 죽었어?"
+    expect_keywords: ["컨테이너", "메모리", "cgroup", "도커"]
+
+  - category: selinux.denial
+    program: kernel
+    facility: kern.warning
+    logs:
+      - "type=1400 audit(1720000000.123:456): avc: denied { open } for pid=999 comm=\"httpd\" name=\"secret\""
+    question: "SELinux/보안 정책에 의해 차단된 동작 있어?"
+    expect_keywords: ["selinux", "보안", "정책", "차단", "권한"]
