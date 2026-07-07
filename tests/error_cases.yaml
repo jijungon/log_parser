@@ -1,0 +1,64 @@
+# 에러 케이스별 E2E 테스트 정본(single source of truth)
+#
+# 이 파일 하나로 두 가지를 만든다:
+#   1) 주입기(inject_errors.sh) — VM에서 logger로 syslog/auth.log 에 써넣을 로그 라인
+#   2) 오케스트레이터(e2e_verify.py) — 챗봇에 물어볼 질문 + 통과 판정 기준
+#
+# 케이스 추가/수정 후에는 반드시 `python3 e2e_verify.py gen` 으로 inject_errors.sh 재생성.
+#
+# 각 케이스 필드:
+#   category  : categories.yaml 이 이 로그에 붙여야 하는 카테고리(= 정답)
+#   program   : logger -t <program>  (syslog program 태그. program 게이트 규칙은 반드시 일치해야 함)
+#   facility  : logger -p <facility.level>  (kern.* → syslog/kern.log, authpriv.* → auth.log)
+#   logs      : 주입할 원본 로그 메시지(헤더 제외 본문). categories.yaml 패턴을 포함해야 매칭됨
+#   question  : 챗봇(localhost:8000)에 물어볼 자연어 질문(한국어)
+#   expect_keywords : 챗봇 답변(analysis/remedy)에 이 중 하나라도 나오면 내용 OK (소문자 비교)
+
+cases:
+  - category: kernel.oom
+    program: kernel
+    facility: kern.err
+    logs:
+      - "Out of memory: Killed process 2481 (java)"
+    question: "메모리 부족으로 죽은 프로세스 있어?"
+    expect_keywords: ["메모리", "oom", "kill"]
+
+  - category: auth.bruteforce
+    program: sshd
+    facility: authpriv.info
+    logs:
+      - "Failed password for invalid user admin from 203.0.113.7 port 51022 ssh2"
+    question: "누가 무차별로 로그인 시도한 흔적 있어?"
+    expect_keywords: ["무차별", "브루트", "brute", "침입", "시도"]
+
+  - category: auth.event
+    program: sshd          # ← program 게이트: sshd 태그가 아니면 auth.event 로 분류 안 됨
+    facility: authpriv.info
+    logs:
+      - "Accepted password for root from 203.0.113.7 port 51044 ssh2"
+    question: "정상적으로 로그인한 기록 보여줘"
+    expect_keywords: ["로그인", "인증", "성공", "세션"]
+
+  - category: disk.io_error
+    program: kernel
+    facility: kern.err
+    logs:
+      - "blk_update_request: I/O error, dev sda, sector 1234567 op 0x0:(READ)"
+    question: "디스크 입출력 오류 났어?"
+    expect_keywords: ["디스크", "입출력", "i/o", "저장"]
+
+  - category: systemd.unit_failure
+    program: systemd
+    facility: daemon.err
+    logs:
+      - "Failed to start app-worker.service - Application Worker."
+    question: "서비스 시작에 실패한 거 있어?"
+    expect_keywords: ["서비스", "시작", "실패", "유닛"]
+
+  - category: fs.error
+    program: kernel
+    facility: kern.err
+    logs:
+      - "EXT4-fs error (device sda1): ext4_find_entry:1234: inode #2: comm ls: reading directory lblock 0"
+    question: "파일시스템 오류가 발생했어?"
+    expect_keywords: ["파일시스템", "디스크", "손상", "오류"]
