@@ -16,8 +16,8 @@ if [[ "$target" == "all" || "$target" == "kernel.bug" ]]; then
   echo "  → [kernel.bug] kernel/kern.err"
 fi
 if [[ "$target" == "all" || "$target" == "kernel.panic" ]]; then
-  logger -t kernel -p kern.emerg "Kernel panic - not syncing: Fatal exception"
-  echo "  → [kernel.panic] kernel/kern.emerg"
+  logger -t kernel -p kern.crit "Kernel panic - not syncing: Fatal exception"
+  echo "  → [kernel.panic] kernel/kern.crit"
 fi
 if [[ "$target" == "all" || "$target" == "process.crash" ]]; then
   logger -t kernel -p kern.err "myapp[12345]: segfault at 7f3a ip 00007f3a sp 00007ffe error 4 in libc.so.6"

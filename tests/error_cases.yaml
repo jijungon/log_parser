@@ -39,7 +39,7 @@ cases:
 
   - category: kernel.panic
     program: kernel
-    facility: kern.emerg
+    facility: kern.crit          # emerg 는 모든 터미널에 wall 방송 → crit 로 낮춤(분류는 내용 기준이라 무관)
     logs:
       - "Kernel panic - not syncing: Fatal exception"
     question: "커널 패닉으로 시스템이 멈춘 적 있어?"
