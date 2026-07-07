@@ -88,7 +88,7 @@ if [[ "$target" == "all" || "$target" == "container.oom" ]]; then
   echo "  → [container.oom] kernel/kern.err"
 fi
 if [[ "$target" == "all" || "$target" == "selinux.denial" ]]; then
-  logger -t kernel -p kern.warning "type=1400 audit(1720000000.123:456): avc: denied { open } for pid=999 comm=\"httpd\" name=\"secret\""
+  logger -t kernel -p kern.warning "type=1400 audit(1720000000.123:456): avc:  denied  { open } for pid=999 comm=\"httpd\" name=\"secret\""
   echo "  → [selinux.denial] kernel/kern.warning"
 fi
 

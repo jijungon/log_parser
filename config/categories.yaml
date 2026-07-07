@@ -180,7 +180,8 @@ categories:
     category: disk.link_error
 
   # ── SELinux / AppArmor ────────────────────────────────────────────────────
-  - pattern: "avc: denied"
+  # 실제 커널 로그는 "avc:  denied"(공백 2칸)로 찍힌다 → \s+ 로 공백 1칸 이상 모두 매칭
+  - pattern: 'avc:\s+denied'
     category: selinux.denial
 
   - pattern: "type=AVC"

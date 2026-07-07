@@ -192,6 +192,6 @@ cases:
     program: kernel
     facility: kern.warning
     logs:
-      - "type=1400 audit(1720000000.123:456): avc: denied { open } for pid=999 comm=\"httpd\" name=\"secret\""
+      - "type=1400 audit(1720000000.123:456): avc:  denied  { open } for pid=999 comm=\"httpd\" name=\"secret\""
     question: "SELinux/보안 정책에 의해 차단된 동작 있어?"
     expect_keywords: ["selinux", "보안", "정책", "차단", "권한"]
