@@ -123,23 +123,17 @@ goldset = 검색 채점 기준 (점수)
 
 ## 전체 흐름
 
+```mermaid
+flowchart LR
+    LOGS["호스트 로그<br/>journald · syslog · auth.log"] --> VEC["Vector<br/>수집 · 멀티라인 병합 · 잡음 제거"]
+    VEC --> NORM["정규화<br/>심각도 · 카테고리 · 필드"]
+    NORM --> DEDUP["dedup<br/>같은 패턴 묶기"]
+    DEDUP --> CYCLE["coordinator<br/>30분치 Envelope 조립"]
+    CYCLE -->|"gzip POST /ingest"| RCV["수신측 서버<br/>← 여기서부터 구현 대상"]
+    RCV -.->|"필요 시 pull<br/>/stat · /trigger-sos · /flush"| CYCLE
 ```
-호스트 서버
-├── journald (systemd 로그)
-├── /var/log/syslog
-└── /var/log/auth.log
-         │
-         ▼
-   [log_parser 에이전트]
-   Vector 수집(멀티라인 병합·노이즈 필터) → 정규화(심각도·카테고리·필드) → 중복제거 → Envelope 조립
-         │
-         │  POST /ingest
-         │  Authorization: Bearer <TOKEN>
-         │  Content-Encoding: gzip
-         │  Content-Type: application/json
-         ▼
-   [수신측 서버] ← 여기서부터 구현 대상
-```
+
+파서(엣지)가 **수집 → 정규화 → 중복 묶기 → 30분마다 push**까지 하고, 저장·조회·분석은 수신측 몫이다. 필요하면 수신측이 pull 창구를 직접 호출한다.
 
 에이전트와 수신측 서버 간의 통신은 두 가지 방향이 있습니다.
 
