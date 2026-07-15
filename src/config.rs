@@ -100,6 +100,12 @@ pub struct TransportConfig {
     pub spool_dir: String,
     #[serde(default = "default_gzip_level")]
     pub http_gzip_level: u32,
+    /// retry/ 데드레터 용량 상한 (MB, 0 = 무제한). 초과 시 오래된 것부터 삭제.
+    #[serde(default = "default_retry_max_mb")]
+    pub retry_max_mb: u64,
+    /// retry/ 데드레터 보관 기간 (시간, 0 = 무기한). 초과 파일 삭제.
+    #[serde(default = "default_retry_ttl_hours")]
+    pub retry_ttl_hours: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,6 +222,8 @@ impl Default for TransportConfig {
             spool_max_mb: default_spool_max_mb(),
             spool_dir: default_spool_dir(),
             http_gzip_level: default_gzip_level(),
+            retry_max_mb: default_retry_max_mb(),
+            retry_ttl_hours: default_retry_ttl_hours(),
         }
     }
 }
@@ -271,6 +279,8 @@ fn default_retry_base() -> u64 { 5 }
 fn default_retry_max() -> u64 { 300 }
 fn default_spool_max_mb() -> u64 { 512 }
 fn default_spool_dir() -> String { "/var/lib/log_parser/spool".into() }
+fn default_retry_max_mb() -> u64 { 256 }
+fn default_retry_ttl_hours() -> u64 { 72 }
 fn default_gzip_level() -> u32 { 6 }
 fn default_listen_addr() -> String { "127.0.0.1:9100".into() }
 fn default_flush_token_env() -> String { "FLUSH_INBOUND_TOKEN".into() }

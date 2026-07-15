@@ -104,13 +104,30 @@ pub async fn run_pipeline(
                 let raw = ev.raw_message().to_string();
                 if raw.is_empty() { continue; }
 
-                let (template, mut fields) = {
-                    let msg = crate::normalize::tokens::strip_syslog_prefix(&raw);
-                    (
-                        crate::normalize::tokens::normalize(msg),
-                        crate::normalize::fields::extract_fields(msg),
-                    )
+                // ── 라인마다 필요한 최소 계산: template + severity + fingerprint ──
+                let msg = crate::normalize::tokens::strip_syslog_prefix(&raw);
+                let template = crate::normalize::tokens::normalize(msg);
+                let severity = crate::normalize::severity::finalize(&ev.log_parser_severity, &raw);
+
+                let fp = {
+                    use std::hash::Hasher as _;
+                    let mut h = Xxh3::new();
+                    h.write(template.as_bytes());
+                    h.write(b"|");
+                    h.write(severity.as_bytes());
+                    h.write(b"|");
+                    h.write(ev.log_parser_source.as_bytes());
+                    h.finish()
                 };
+
+                // 윈도우 안의 중복 라인이면 여기서 끝 — fields/category 계산 생략
+                // (기존에는 라인마다 계산 후 병합 시 버려졌음)
+                if dedup.try_merge(fp, &raw, ev.timestamp, severity) {
+                    continue;
+                }
+
+                // ── 첫 등장(또는 창 만료)에만: 필드 추출 + 보강 + 분류 ──
+                let mut fields = crate::normalize::fields::extract_fields(msg);
                 // Enrich with journald/file structured fields from Vector (message-extracted wins)
                 if let Some(pid) = &ev.pid {
                     fields.entry("pid".to_string())
@@ -132,19 +149,7 @@ pub async fn run_pipeline(
                     fields.entry("source_host".to_string())
                         .or_insert_with(|| serde_json::Value::String(ev.host.clone()));
                 }
-                let severity  = crate::normalize::severity::finalize(&ev.log_parser_severity, &raw);
                 let category  = categories.categorize_with_fields(&raw, &fields);
-
-                let fp = {
-                    use std::hash::Hasher as _;
-                    let mut h = Xxh3::new();
-                    h.write(template.as_bytes());
-                    h.write(b"|");
-                    h.write(severity.as_bytes());
-                    h.write(b"|");
-                    h.write(ev.log_parser_source.as_bytes());
-                    h.finish()
-                };
 
                 if let Some(ev) = dedup.push(fp, ev.log_parser_source, severity.to_string(),
                     category.to_string(), template, raw, ev.timestamp, fields) {
@@ -287,11 +292,26 @@ async fn send_with_backoff(
     retry_base: u64,
     retry_max: u64,
 ) {
+    // compress-once: 루프 진입 전에 1회만 직렬화+압축하고, 모든 재시도에서 재사용.
+    // (기존에는 매 시도마다 재직렬화+재gzip → 장애 재시도 폭풍 시 5% CPU 예산을 태워 수집을 굶겼음)
+    let body = match serde_json::to_vec(&envelope).map_err(|e| e.to_string())
+        .and_then(|json| t.compress(&json).map_err(|e| format!("{e:?}")))
+    {
+        Ok(b) => b,
+        Err(e) => {
+            error!("envelope 직렬화/압축 실패 — retry/로 이동: {e}");
+            let sp = Arc::clone(&spool);
+            let p = spool_path.clone();
+            tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
+            return;
+        }
+    };
+
     let mut backoff = retry_base;
     let mut attempt: u64 = 0;
 
     loop {
-        match t.send(&envelope).await {
+        match t.send_compressed(body.clone()).await {
             Ok(()) => {
                 let sp = Arc::clone(&spool);
                 let p = spool_path.clone();

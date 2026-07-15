@@ -161,7 +161,8 @@ impl FieldExtractor {
         }
 
         let mut auto = 0usize;
-        if self.settings.logfmt {
+        // '=' 바이트가 없으면 logfmt 매치 불가 — captures_iter 전체 스캔 생략
+        if self.settings.logfmt && msg.as_bytes().contains(&b'=') {
             for cap in LOGFMT_RE.captures_iter(msg) {
                 if auto >= self.settings.max_auto_fields {
                     break;

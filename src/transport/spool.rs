@@ -18,6 +18,8 @@ pub struct Spool {
     pub(crate) max_bytes: u64,         // new/ 용량 상한 (0 = 무제한)
     pub(crate) used_bytes: AtomicU64,  // new/ 현재 사용량
     retry_file_count: AtomicUsize,     // retry/ 파일 수 (O(1) 조회, fs::read_dir 불필요)
+    retry_max_bytes: u64,              // retry/ 용량 상한 (0 = 무제한)
+    retry_ttl_secs: u64,               // retry/ 보관 기간 (0 = 무기한)
     save_lock: Mutex<()>,              // eviction check + write 직렬화
 }
 
@@ -54,8 +56,94 @@ impl Spool {
             max_bytes: max_mb * 1024 * 1024,
             used_bytes: AtomicU64::new(used_bytes),
             retry_file_count: AtomicUsize::new(initial_retry_count),
+            // 기본값 = 무제한(0). 운영은 with_retry_limits()로 실제 한도 지정.
+            // (테스트는 new()만 쓰므로 기존 동작 보존)
+            retry_max_bytes: 0,
+            retry_ttl_secs: 0,
             save_lock: Mutex::new(()),
         })
+    }
+
+    /// retry/ 데드레터 상한 설정 (운영용). max_mb=0/ttl_hours=0 이면 각각 무제한.
+    /// 설정 즉시 기동 시점의 초과분을 정리한다.
+    pub fn with_retry_limits(mut self, max_mb: u64, ttl_hours: u64) -> Self {
+        self.retry_max_bytes = max_mb * 1024 * 1024;
+        self.retry_ttl_secs = ttl_hours * 3600;
+        self.enforce_retry_limits();
+        self
+    }
+
+    /// retry/ 데드레터에 TTL·용량 상한을 적용해 오래된/초과 파일을 삭제한다.
+    /// 미배달 데이터를 버리는 정책적 삭제이므로 드롭 시 경고를 남긴다.
+    /// (수신 서버 장기 다운 시 디스크가 가득 차 호스트를 위협하는 것을 방지)
+    fn enforce_retry_limits(&self) {
+        if self.retry_max_bytes == 0 && self.retry_ttl_secs == 0 {
+            return; // 한도 미설정 — 기존 동작(무제한) 보존
+        }
+        let entries = match fs::read_dir(&self.retry_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        // (경로, 생성시각, 크기) 수집 후 시간순(오래된 것 먼저) 정렬
+        let mut files: Vec<(PathBuf, DateTime<Utc>, u64)> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+            .filter_map(|p| {
+                let ts = ulid_timestamp(&p)?;
+                let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                Some((p, ts, size))
+            })
+            .collect();
+        files.sort_by_key(|(_, ts, _)| *ts);
+
+        let now = Utc::now();
+        let mut dropped = 0usize;
+
+        // 1) TTL 초과 삭제
+        if self.retry_ttl_secs > 0 {
+            let ttl = chrono::Duration::seconds(self.retry_ttl_secs as i64);
+            files.retain(|(p, ts, _)| {
+                if now - *ts > ttl {
+                    if fs::remove_file(p).is_ok() {
+                        self.retry_file_count
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1)))
+                            .ok();
+                        dropped += 1;
+                    }
+                    false // 목록에서 제거
+                } else {
+                    true
+                }
+            });
+        }
+
+        // 2) 용량 상한 초과 시 오래된 것부터 삭제
+        if self.retry_max_bytes > 0 {
+            let mut total: u64 = files.iter().map(|(_, _, s)| *s).sum();
+            let mut iter = files.into_iter();
+            while total > self.retry_max_bytes {
+                let (p, _, size) = match iter.next() {
+                    Some(f) => f,
+                    None => break,
+                };
+                if fs::remove_file(&p).is_ok() {
+                    total = total.saturating_sub(size);
+                    self.retry_file_count
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1)))
+                        .ok();
+                    dropped += 1;
+                }
+            }
+        }
+
+        if dropped > 0 {
+            warn!(
+                dropped,
+                remaining = self.retry_file_count.load(Ordering::SeqCst),
+                "retry/ 데드레터 상한 초과 — 오래된 미배달 envelope 삭제 (디스크 보호)"
+            );
+        }
     }
 
     /// envelope을 new/ WAL에 기록. new/ 용량 초과 시 oldest 파일을 retry/로 evict 후 저장.
@@ -109,6 +197,10 @@ impl Spool {
         fs::write(&path, json)
             .with_context(|| format!("spool 쓰기 실패: {}", path.display()))?;
         self.used_bytes.fetch_add(json_len, Ordering::SeqCst);
+
+        // eviction으로 retry/에 파일이 유입됐을 수 있으니 상한 재적용
+        drop(_lock);
+        self.enforce_retry_limits();
         Ok(path)
     }
 
@@ -146,6 +238,7 @@ impl Spool {
                 }
                 self.retry_file_count.fetch_add(1, Ordering::SeqCst);
                 info!(path = %dest.display(), "전송 실패 envelope retry/로 이동");
+                self.enforce_retry_limits();
             }
             Err(e) => warn!(src = %path.display(), dest = %dest.display(), err = %e,
                 "retry/ 이동 실패 — 파일 new/에 보존"),
@@ -413,6 +506,39 @@ mod tests {
         assert!(path.exists());
         let on_disk = fs::read(&path).unwrap();
         assert_eq!(on_disk, json);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_ttl_deletes_old_files() {
+        let dir = tmp_dir("retry_ttl");
+        // 100시간 전 ULID 파일을 retry/에 직접 생성
+        let old_ms = (Utc::now().timestamp_millis() - 100 * 3600 * 1000) as u64;
+        let old_id = Ulid::from_parts(old_ms, 0).to_string();
+        fs::create_dir_all(dir.join("retry")).unwrap();
+        let old_path = dir.join("retry").join(format!("{old_id}.json"));
+        fs::write(&old_path, b"{}").unwrap();
+
+        // TTL 1시간 적용 → 100시간 전 파일 삭제 (with_retry_limits가 생성 시 enforce)
+        let spool = Spool::new(dir.to_str().unwrap(), 10).unwrap().with_retry_limits(0, 1);
+        assert!(!old_path.exists(), "TTL 초과 retry 파일은 삭제되어야 함");
+        assert_eq!(spool.retry_count(), 0, "retry_file_count가 삭제를 반영해야 함");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_no_limits_keeps_old_files() {
+        let dir = tmp_dir("retry_nolimit");
+        let old_ms = (Utc::now().timestamp_millis() - 100 * 3600 * 1000) as u64;
+        let old_id = Ulid::from_parts(old_ms, 0).to_string();
+        fs::create_dir_all(dir.join("retry")).unwrap();
+        let old_path = dir.join("retry").join(format!("{old_id}.json"));
+        fs::write(&old_path, b"{}").unwrap();
+
+        // 한도 미설정(new()만) → 기존 동작 유지, 오래된 파일도 보존
+        let spool = Spool::new(dir.to_str().unwrap(), 10).unwrap();
+        assert!(old_path.exists(), "한도 미설정 시 오래된 파일도 보존해야 함");
+        assert_eq!(spool.retry_count(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

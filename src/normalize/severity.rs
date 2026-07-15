@@ -1,3 +1,6 @@
+use aho_corasick::AhoCorasick;
+use once_cell::sync::Lazy;
+
 /// 키워드 기반 severity 보정 — Vector 1차 할당 override
 static CRITICAL_KEYWORDS: &[&str] = &[
     "panic:",
@@ -9,13 +12,18 @@ static CRITICAL_KEYWORDS: &[&str] = &[
     "nmi: not continuing",
 ];
 
+// 단일 SIMD 패스 매처 — 라인마다 to_lowercase() 할당 + 키워드별 재스캔 제거
+static CRITICAL_AC: Lazy<AhoCorasick> = Lazy::new(|| {
+    AhoCorasick::builder()
+        .ascii_case_insensitive(true)
+        .build(CRITICAL_KEYWORDS)
+        .expect("critical keyword matcher")
+});
+
 /// Vector가 할당한 initial severity + raw message로 최종 severity 결정
 pub fn finalize(initial: &str, message: &str) -> &'static str {
-    let lower = message.to_lowercase();
-    for kw in CRITICAL_KEYWORDS {
-        if lower.contains(kw) {
-            return "critical";
-        }
+    if CRITICAL_AC.is_match(message) {
+        return "critical";
     }
     match initial {
         "critical" => "critical",
