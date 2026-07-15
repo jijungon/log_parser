@@ -346,6 +346,8 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 
 `retry/`에 쌓인 파일은 자동 재전송되지 않습니다. 수신측 서버가 `POST :9100/drain-spool`을 호출해 시간 창을 지정하면 해당 창의 파일을 재전송합니다. 파일명은 ULID이므로 생성 시각 기준 필터링이 가능합니다.
 
+> **⚠ retry/ 상한·TTL** — `retry/`는 무한정 쌓이지 않는다. `transport.retry_max_mb`(기본 256MB)·`transport.retry_ttl_hours`(기본 72h)를 넘으면 **오래된 미배달 파일부터 자동 삭제**된다(수신측 장기 다운 시 호스트 디스크 보호). 즉 drain 없이 방치하면 TTL·용량 초과분은 유실될 수 있으므로, 장기 미배달이 예상되면 그 전에 `drain-spool`로 회수해야 한다. (0으로 설정하면 각각 무제한)
+
 ---
 
 
@@ -430,7 +432,7 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 | `cycle.boot_id`          | string  | 부팅 고유 ID (재부팅마다 변경)                                                                                   |
 | `cycle.ts`               | RFC3339 | `log_batch`: cycle 시작 타임스탬프 / `stat_snapshot`·`sos_snapshot`: 수집 시각                                   |
 | `cycle.window`           | string  | `"시작/종료"` 형태의 실제 데이터 수집 구간                                                                            |
-| `cycle.seq`              | u64     | cycle 순번. **에이전트 프로세스 재시작** 시 1부터 재시작. `host_id + boot_id + seq` 세 값이 중복 방지 키 → [중복 수신 방지](#중복-수신-방지) |
+| `cycle.seq`              | u64     | cycle 순번. `static_state.enabled`(기본 true)면 `seq_state_path` 파일에 보존되어 **재시작 후에도 이어진다**(상태 파일이 없을 때만 1부터). `host_id + boot_id + seq` 세 값이 중복 방지 키 → [중복 수신 방지](#중복-수신-방지) |
 | `headers.counts`         | object  | severity/category별 이벤트 수. `stat_snapshot`/`sos_snapshot`에서는 필드 자체 생략                                  |
 | `headers.process_health` | object  | Vector 재시작 횟수, 에이전트 가동 시간. stat/sos에서 생략                                                              |
 | `headers.duration_ms`    | u64     | cycle 실제 경과 시간(ms)                                                                                    |
@@ -1072,6 +1074,17 @@ log_parser/
 > 최신 항목을 위에 추가한다.
 
 
+
+### 2026-07-15 — 핫패스 성능·spool 안정성 개선 + 인수인계 문서 정비
+
+수집·파싱 **방법론은 그대로** 두고(이미 적정), 출력(템플릿·지문) 불변인 성능 개선과 운영 안전성만 손봤다. 그리고 대규모 확장 시의 책임 경계·계약을 문서로 확정했다.
+
+| 구분 | 내용 |
+|------|------|
+| 핫패스 성능 | 죽은 serde flatten 제거, 정규화 12패스 `RegexSet`+`Cow`, severity `aho-corasick` 단일 패스, 중복 라인 lazy extraction, logfmt 가드 — 라인당 CPU·할당 감소(출력 동일) |
+| spool 안전 | `retry/` 데드레터 **용량 상한 + TTL**(무제한 디스크 성장 차단), **compress-once**(재시도마다 재직렬화·재gzip 제거) |
+| 대규모 계약 | `docs/6_SCALE_CONTRACT.md` 신설 — 증분 pull(`since_seq`)·이벤트 스토어는 **미채택**, 중앙 플랫폼은 기존 push/스냅샷으로 소비. 책임 경계(저장은 중앙 몫)를 루트 README 상단에 명시 |
+| 인수인계 | `docs/README.md` 색인, `reference/stack/`에 수신측 산출물(playbook·goldset) 스냅샷 추가 |
 
 ### 2026-07-01 — Promtail 파이프라인 벤치마킹
 
