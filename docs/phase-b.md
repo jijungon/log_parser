@@ -1,6 +1,6 @@
 # Phase B — 실행 계획 + 용어집
 
-> 2_MASTER_PLAN.md §18~19 분리본. 설계·아키텍처는 2_MASTER_PLAN.md 참조.
+> master-plan.md §18~19 분리본. 설계·아키텍처는 master-plan.md 참조.
 
 ---
 
@@ -8,7 +8,7 @@
 
 각 단계의 "검증" 항목이 통과해야 다음 단계. 통과 못 하면 멈추고 원인 진단.
 
-| Step | 작업·산출물 | 검증 | 담당 (`3_AGENT_ROLES.md`) |
+| Step | 작업·산출물 | 검증 | 담당 (`agent-roles.md`) |
 |:-:|------|------|------|
 | 1 | 스켈레톤 + cgroup 자가 격리 + `agent.yaml` 로드 | `cgroup.procs`에 PID, `memory.current`=RSS, default값 동작 | Coordinator + Agent 1 |
 | 2 | `envelope.rs` 단일 형식 (headers + body) + `HttpJsonTransport` (Bearer+gzip) | mock 서버에서 envelope 정상 수신 (`event_kind="log_batch"`) | Coordinator + Agent 5 |
@@ -16,7 +16,7 @@
 | 4 | Normalizer + Dedup(30s/50K LRU) + 카테고리 태깅(categories.yaml 전체 항목) + Coordinator envelope 조립 | 100→1 압축, LRU 50,001 evict, 30분 cycle envelope 1건, `categories.yaml` 룩업 | Agent 4 + Coordinator |
 | 5 | 신뢰성(disk-buffer + backoff) + inbound `POST /flush` | 단절·재시작·burst에서 critical drop 0, `/flush` 즉시 응답 + 새 cycle | Agent 5 |
 
-> 각 Step의 완료 기준 detail은 `3_AGENT_ROLES.md` 해당 에이전트 절. 룰·스키마는 `2_MASTER_PLAN.md §7` + `1_observability-design.md §4·§5·§6`.
+> 각 Step의 완료 기준 detail은 `agent-roles.md` 해당 에이전트 절. 룰·스키마는 `master-plan.md §7` + `observability-design.md §4·§5·§6`.
 
 ---
 

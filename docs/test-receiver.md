@@ -1,6 +1,6 @@
 # Phase B 검증용 Test Receiver
 
-> **목적**: Phase B 구현 검증 전용. 운영 수신측(4_RECEIVER_CONTRACT.md)과 무관한 별도 스펙.
+> **목적**: Phase B 구현 검증 전용. 운영 수신측(receiver-contract.md)과 무관한 별도 스펙.
 > 단순하게 만들고 빠르게 쓴다. 품질·확장성·운영 요건 없음.
 
 ---

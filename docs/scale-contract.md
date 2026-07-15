@@ -1,6 +1,6 @@
 # 파서 출력 계약 — 대규모 확장분 (구현예정 포함)
 
-> `4_RECEIVER_CONTRACT.md`·`RECEIVER_TYPE_SPEC.md`의 **확장 문서**.
+> `receiver-contract.md`·`receiver-type-spec.md`의 **확장 문서**.
 > 대규모 플릿(수천~수만 호스트) 전제에서, 파서가 **추가로 내보내야/노출해야** 하는 것들의 명세.
 > 원칙: **이 문서의 항목은 전부 파서(엣지)가 책임진다.** 중앙 플랫폼(Kafka·ClickHouse·벡터·S3)을 어떻게 짓는지는 여기서 다루지 않으며, 그 설계는 `log_stack_AI/docs/`(수신측)에 있다.
 > 상태 표기: **[적용됨]** = 소스 반영·검증 완료 / **[예정]** = 미구현, 계약만 확정.
@@ -9,7 +9,7 @@
 
 ## 0. 왜 이 문서가 파서 쪽에 있나
 
-파서는 receiver를 만들지 않지만, "무엇을 내보내는가"는 파서가 소유·책임진다(`4_RECEIVER_CONTRACT.md` §0 철학과 동일). 아래 항목들은 **어떤 중앙 플랫폼을 나중에 짓든 공통 전제**이므로, 지금 파서에서 먼저 확정·구현한다.
+파서는 receiver를 만들지 않지만, "무엇을 내보내는가"는 파서가 소유·책임진다(`receiver-contract.md` §0 철학과 동일). 아래 항목들은 **어떤 중앙 플랫폼을 나중에 짓든 공통 전제**이므로, 지금 파서에서 먼저 확정·구현한다.
 
 ---
 
@@ -65,7 +65,7 @@ headers: {
 
 ## 3. 멱등키 (기존 계약 재확인 + pull 경로 적용) [적용됨 일부]
 
-`4_RECEIVER_CONTRACT.md §2`가 이미 `(host_id, boot_id, seq)` 중복 방지를 명시함. 대규모에선 이 키를 **push·pull·drain·재생 전 경로**에서 동일하게 쓴다. 수신측은 이 키로 upsert → at-least-once 전송이 안전.
+`receiver-contract.md §2`가 이미 `(host_id, boot_id, seq)` 중복 방지를 명시함. 대규모에선 이 키를 **push·pull·drain·재생 전 경로**에서 동일하게 쓴다. 수신측은 이 키로 upsert → at-least-once 전송이 안전.
 
 ---
 
@@ -108,7 +108,7 @@ headers: {
 
 ## 7. schema 진화 (기존 §5 준수)
 
-위 추가 키(`max_event_seq`, `template_id`, `log_counts` 등)는 전부 **키 추가(additive)** → `4_RECEIVER_CONTRACT.md §5`에 따라 minor 버전업, 기존 수신측과 호환(모르는 키 무시).
+위 추가 키(`max_event_seq`, `template_id`, `log_counts` 등)는 전부 **키 추가(additive)** → `receiver-contract.md §5`에 따라 minor 버전업, 기존 수신측과 호환(모르는 키 무시).
 
 ---
 
