@@ -21,8 +21,12 @@ log_parser(서버측 파서) 설계·구현·수신측 계약 문서 모음. 처
 | [4_RECEIVER_CONTRACT.md](4_RECEIVER_CONTRACT.md) | 수신측 계약 — 외부 인터페이스 명세(파서↔수신측 약속) |
 | [5_TEST_RECEIVER.md](5_TEST_RECEIVER.md) | Phase B 검증용 Test Receiver 스펙 (운영 수신측과 무관) |
 | [6_SCALE_CONTRACT.md](6_SCALE_CONTRACT.md) | 대규모 확장 계약 — 4_의 확장. 증분 pull 미채택 등 최신 결정 반영 |
+| [7_PULL_API.md](7_PULL_API.md) | On-demand Pull API 상세 — /stat·/trigger-sos·/flush·/drain-spool curl·에러 코드 |
+| [8_PIPELINE.md](8_PIPELINE.md) | 처리 파이프라인 단계별 상세 — 흐름 다이어그램 + 로그 한 줄 7단계 |
 | [IMPL_NOTES.md](IMPL_NOTES.md) | 구현 참조 — 코드 수준 세부사항(2_에서 분리) |
 | [RECEIVER_TYPE_SPEC.md](RECEIVER_TYPE_SPEC.md) | 수신측 Information Type Spec — envelope/event_kind 상세 타입 |
+
+> 루트 [`../README.md`](../README.md)는 오리엔테이션·운영·요약 허브다. 상세(타입·API·파이프라인)는 위 문서로 링크된다. 변경 이력은 [`../CHANGELOG.md`](../CHANGELOG.md).
 
 ## 현재 상태 메모 (2026-07-15 기준)
 

@@ -80,8 +80,6 @@ docker compose logs -f log-parser       # 기동·수집 로그 확인
 > 거기서 실물로 확인할 수 있다. **정본은 `log_stack_AI`** 이며, 사본은 자동 갱신되지 않는다
 > (동기화 방법은 [`reference/stack/README.md`](reference/stack/README.md) 참조).
 
-
-
 ### `config/fields.yaml` — 필드 추출 규칙 ⭐
 
 로그 본문에서 구조화 필드(`pid`, `user`, `dev`, `unit` …)를 뽑는 규칙이다. 예전에는 소스 코드에
@@ -95,16 +93,11 @@ docker compose logs -f log-parser       # 기동·수집 로그 확인
 추출된 필드는 dedup·수신측 검색 라벨로 쓰이며, `categories.yaml`의 `logger:` 조건도 여기서 뽑은 `logger` 필드를 참조한다.
 파일이 없거나 깨지면 에이전트는 기존 내장(builtin) 추출기 6종으로 자동 fallback 한다.
 
-
-
-
-
 ```markdown
 categories = 로그 분류
 fields = 필드 추출
 playbook = 답변 지식 (재료) ← 여기만 정정
 goldset = 검색 채점 기준 (점수)
-
 
 (수집 시점) 분류 → 필드추출 ← 로그 들어올 때 미리
 (질문 시점) 검색+게이트 → playbook 답변 ← 질문할 때
@@ -128,10 +121,6 @@ goldset = 검색 채점 기준 (점수)
 
 ---
 
-
-
-
-
 ## 전체 흐름
 
 ```
@@ -154,129 +143,19 @@ goldset = 검색 채점 기준 (점수)
 
 에이전트와 수신측 서버 간의 통신은 두 가지 방향이 있습니다.
 
-
 | 방향       | 호출자    | 수신자    | 수신측이 구현할 것               |
 | -------- | ------ | ------ | ------------------------ |
 | **push** | 에이전트   | 수신측 서버 | `POST /ingest` 엔드포인트     |
 | **pull** | 수신측 서버 | 에이전트   | `GET/POST` 호출 클라이언트 (선택) |
 
-
 - **push** — 에이전트가 30분마다 자동으로 수신측 서버로 HTTP POST를 보냅니다.
 - **pull** — 수신측 서버가 필요할 때 에이전트의 `/stat`, `/trigger-sos` 엔드포인트를 직접 호출할 수 있습니다.
 
-**Push — 30분마다 자동 전송**
-
-```mermaid
-flowchart TD
-    subgraph HOST["호스트 로그 소스"]
-        J["journald"]
-        SY["syslog"]
-        AU["auth.log"]
-    end
-
-    VEC["Vector (자식 프로세스)<br/>멀티라인 병합 · 노이즈 필터"]
-
-    subgraph AGENT["log_parser 에이전트"]
-        V["pipeline<br/>Vector 이벤트 수신"]
-        N["normalize<br/>심각도·카테고리·필드 분류"]
-        D["dedup<br/>30초 내 같은 패턴 병합"]
-        C["coordinator<br/>30분치를 Envelope으로 조립"]
-        T["transport<br/>전송 및 재시도"]
-        SP[("spool<br/>전송 전 저장<br/>성공 시 삭제")]
-    end
-
-    RCV["수신측 서버"]
-
-    J & SY & AU -->|로그 읽기| VEC
-    VEC -->|소켓으로 이벤트 전달| V
-    V --> N --> D --> C
-    C -->|30분마다| T
-    T -->|전송 전 기록 / 성공 시 삭제| SP
-    T -->|HTTP POST| RCV
-```
-
-
-
-**Pull — 수신 서버가 에이전트에 직접 요청**
-
-```mermaid
-flowchart LR
-    RCV["수신측 서버"]
-    IN["inbound :9100"]
-    C["coordinator"]
-
-    RCV -->|"GET /stat · POST /trigger-sos"| IN
-    RCV -->|POST /flush| IN
-    IN -->|즉시 방출 신호| C
-    C -->|Envelope 반환| IN
-    IN -->|"Envelope · 시스템 상태"| RCV
-```
-
-
-
-> **Vector 수집 단계 (자동 생성** `vector.toml`**)** — 파일 소스(syslog·auth)는 타임스탬프 헤더로 시작하는 줄을 새 이벤트로 보고, 헤더 없는 후속 줄(자바 스택트레이스·커널 콜트레이스)을 **한 이벤트로 병합**한다(multiline). 이어서 route/소켓으로 넘어가기 전에 **노이즈 필터(drop_noise)** 가 잡음 로그(기본: journald debug)를 버려 Rust 부하·전송량을 줄인다. 버려진 원본이 필요하면 pull API(`/trigger-sos`·`/stat`)로 회수할 수 있다. 이 설정은 distro 감지 결과로 에이전트가 **자동 생성**하므로 직접 편집하지 않는다.
-
-
-
-### 로그 한 줄이 처리되는 과정 (단계별)
-
-**여러 겹 정수기 필터**를 떠올리면 쉽다 — 지저분한 원본 로그가 단계를 지날 때마다 걸러지고 라벨이 붙어, 마지막엔 깔끔하게 정리된 한 건으로 나온다. 각 단계가 **무슨 일을 하고 무엇을 만들어내는지**를 한눈에 정리한다. (기능이 계속 늘어나므로 "어디서 무슨 일을 하는지"의 단일 기준표로 둔다.)
-
-```mermaid
-flowchart TD
-    RAW["원본 로그 줄<br/>(syslog 헤더 + 메시지)"]
-    subgraph VECTOR["① Vector 수집"]
-        ML["multiline 병합"]
-        DN["drop_noise 필터"]
-    end
-    subgraph NORM["log_parser normalize (Rust)"]
-        TK["② 정규화 tokens.rs"]
-        SV["③ 심각도 severity"]
-        CT["④ 분류 categories.yaml"]
-        FD["⑤ 필드추출 fields.yaml"]
-    end
-    DP["⑥ 중복 묶기 dedup"]
-    EV["⑦ 조립·전송 coordinator"]
-    OUT["수신측 전송"]
-
-    RAW --> ML --> DN --> TK --> SV --> CT --> FD --> DP --> EV --> OUT
-```
-
-
-
-
-| 단계                           | 하는 일 (쉽게)                                                                         | 자세히                                                                              | 결과물                                 |
-| ---------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------- |
-| **① Vector 수집**              | 로그를 읽어오면서, 여러 줄로 쪼개진 로그(자바 에러 등)를 **한 덩어리로 붙이고** 쓸모없는 잡음은 **버린다**                 | 타임스탬프 헤더로 이벤트 경계 판정 → 후속 줄 병합(multiline), `drop_noise`로 잡음(기본 journald debug) 폐기 | 깔끔해진 로그 이벤트                         |
-| **② 정규화** (`tokens.rs`)      | 로그마다 다른 부분(IP·숫자·날짜·경로)을 `<IP4>`·`<NUM>` 같은 **자리표시자로 바꿔**, 같은 종류 로그가 같은 모양이 되게 한다 | syslog 헤더(RFC3164·ISO) strip 후 가변 토큰 치환(UUID·IP·경로·숫자 등)                         | 정규 문장 `template` + 지문 `fingerprint` |
-| **③ 심각도** (`severity`)       | 이 로그가 **얼마나 급한지** 판정                                                              | PRIORITY·키워드로 매핑                                                                 | `critical`/`error`/`warn`/`info`    |
-| **④ 분류** (`categories.yaml`) | 로그가 **무슨 사건인지 이름표**를 붙인다 (메모리 부족·로그인 실패 등)                                        | aho-corasick으로 후보만 추린 뒤 정규식 first-match, `program`/`logger` 게이트                  | 카테고리 (예: `kernel.oom`)              |
-| **⑤ 필드 추출** (`fields.yaml`)  | 로그에서 **누가·무엇을**(사용자·PID·서비스명) 꺼내 따로 정리                                            | 정규식 캡처(`pid`·`user`·`dev`·`unit`) + `logfmt`/`json` 자동 승격                        | `fields` (예: `{user: root}`)        |
-| **⑥ 중복 묶기** (`dedup`)        | 30초 안에 **똑같은 로그가 여러 번** 오면 하나로 합치고 횟수만 센다                                         | 같은 `fingerprint` 병합, 발생 수 누적, 원본 샘플 보존                                           | 묶인 `DedupEvent` (`count` 포함)        |
-| **⑦ 조립·전송** (`coordinator`)  | 30분치를 모아 **한 봉투(Envelope)로 싸서** 수신 서버로 보낸다                                        | 카테고리·심각도 집계, 사이클·헤더 메타 부착                                                        | `Envelope` → HTTP POST              |
-
-
-> 순서: **① 수집 → ②~⑤ 정규화 → ⑥ 중복 묶기 → ⑦ 조립·전송**. 최종 산출물 `DedupEvent`의 필드 정의는 [DedupEvent 스키마](#dedupevent-스키마), 카테고리 목록은 [Category 분류표](#category-분류표) 참조.
-
-
-
-#### ④ 분류 · ⑤ 필드 추출 · ⑥ 중복 묶기 — 뭐가 다른가
-
-셋 다 로그를 "처리"하지만 **목적이 다르다.** 로그 한 줄 `Out of memory: Killed process 2481 (java)` 로 비교하면 한눈에 갈린다.
-
-
-| 단계          | 답하는 질문                | 이 예시에서 하는 일                            |
-| ----------- | --------------------- | -------------------------------------- |
-| **④ 분류**    | "이게 **무슨 종류** 사건이야?"  | `kernel.oom`(메모리 부족)이라는 **이름표**를 붙임    |
-| **⑤ 필드 추출** | "그 안에 **구체적 값**이 뭐야?" | `pid=2481` 같은 **속 알맹이 값**을 뽑음          |
-| **⑥ 중복 묶기** | "그게 **몇 번** 일어났어?"    | 같은 로그가 5번 오면 → **1건 +** `count=5` 로 압축 |
-
-
-한마디로 **④는 종류 이름표, ⑤는 속 알맹이, ⑥은 반복 횟수**를 다룬다. ④·⑤는 로그 하나를 **풍부하게 만드는**(라벨·값 붙이기) 단계고, ⑥은 여러 개를 **줄이는**(합치기) 단계라는 점도 다르다.
+> **Vector 수집** — 파일 소스의 여러 줄 로그(스택트레이스)를 타임스탬프 헤더 기준 **한 이벤트로 병합**(multiline)하고 **노이즈 필터(drop_noise)**로 잡음(기본 journald debug)을 버린다. `vector.toml`은 distro 감지로 **자동 생성**(직접 편집 안 함).
+>
+> 흐름 다이어그램(push/pull)과 로그 한 줄이 거치는 **7단계 상세**는 [`docs/8_PIPELINE.md`](docs/8_PIPELINE.md).
 
 ---
-
-
 
 ## 에이전트 연결 설정
 
@@ -316,11 +195,7 @@ cycle:
 
 ---
 
-
-
 ## 수신 엔드포인트 구현 요건
-
-
 
 ### 요청 형식
 
@@ -334,8 +209,6 @@ Content-Encoding: gzip
 - Body는 **gzip 압축된 JSON**입니다. 반드시 압축 해제 후 파싱하세요.
 - 대부분의 HTTP 프레임워크(requests, httpx, axios 등)는 `Content-Encoding: gzip`을 자동으로 처리합니다.
 
-
-
 ### 응답 코드 (수신측 → 에이전트 push 응답)
 
 > 에이전트가 `POST /ingest`로 push했을 때 **수신측이 돌려주는** 코드와 그에 대한 에이전트 반응. (반대 방향인 pull 응답은 [On-demand Pull API](#on-demand-pull-api)의 "에러 응답 코드" 참조)
@@ -347,9 +220,6 @@ Content-Encoding: gzip
 | `5xx`               | 서버 오류      | 재시도 (지수 백오프)                               |
 | `401`, `403`        | 인증 오류      | **재시도 없음** — `retry/`로 이동 (drain API로 재전송) |
 | `4xx` (기타)          | 요청 오류      | **재시도 없음** — `retry/`로 이동 (drain API로 재전송) |
-
-
-
 
 ### spool (WAL) 두 풀 구조
 
@@ -373,19 +243,14 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 
 ---
 
-
-
 ## 데이터 구조
 
 > 수신측 서버를 구성할 때는 `[docs/RECEIVER_TYPE_SPEC.md](docs/RECEIVER_TYPE_SPEC.md)`를 참조하세요.
 > Envelope·DedupEvent·최대 7개 섹션(metrics/processes/network/systemd/static_state/config/hardware) 전체의 상세 타입 정의와 제약 조건이 정리되어 있습니다.
 
-
-
 ### 세 가지 Envelope 한눈 비교
 
 에이전트가 생성하는 Envelope은 세 종류입니다. **sos = stat + log** 관계입니다.
-
 
 | 섹션             | 수집 출처                                                                      | stat_snapshot | log_batch | sos_snapshot | 전송 방식              |
 | -------------- | -------------------------------------------------------------------------- | ------------- | --------- | ------------ | ------------------ |
@@ -398,9 +263,7 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 | `hardware`     | /proc/cpuinfo, /proc/meminfo, /sys/block/, lspci                           | ✅             |           | ✅            | pull 즉시 / 사고 시     |
 | `logs`         | journald, syslog, auth.log, audit.log                                      |               | ✅ (30분치)  | ✅ (4시간치)     | 30분 자동 push / 사고 시 |
 
-
 > **config vs static_state 구분**: `config`는 설정 파일 원본 내용(`/etc/sysctl.conf`에 뭐라고 써있나), `static_state`는 현재 실제 적용된 런타임 값(`sysctl -a`로 지금 무엇이 동작 중인가). 파일 내용과 런타임 적용값이 다를 수 있으므로 둘 다 필요.
-
 
 |            | stat_snapshot           | log_batch   | sos_snapshot                    |
 | ---------- | ----------------------- | ----------- | ------------------------------- |
@@ -410,10 +273,7 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 | **seq 필드** | 없음                      | 있음 (단조 증가)  | 없음                              |
 | **소요 시간**  | ~200ms                  | 백그라운드       | 수 초~수십 초                        |
 
-
 ---
-
-
 
 ### 상세 타입 정의 → `docs/RECEIVER_TYPE_SPEC.md`
 
@@ -431,126 +291,17 @@ Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마
 
 ## On-demand Pull API
 
-에이전트는 수신측이 호출할 수 있는 HTTP 엔드포인트를 `9100` 포트에서 제공합니다.
+에이전트가 `127.0.0.1:9100`에서 제공하는 pull 엔드포인트(수신측이 필요 시 호출). 원격 호출은 `agent.yaml`의 `inbound.listen_addr` + 방화벽. **curl 예시·파라미터·에러 코드 상세는 [`docs/7_PULL_API.md`](docs/7_PULL_API.md).**
 
-> 기본 바인드는 `127.0.0.1:9100`(로컬호스트 전용)입니다.
-> 원격에서 호출하려면 `agent.yaml`의 `inbound:` 섹션을 아래와 같이 설정하고 방화벽을 여세요.
-
-```yaml
-inbound:
-  listen_addr: "0.0.0.0:9100"
-  stat_token_env:  "STAT_INBOUND_TOKEN"    # 미설정 시 인증 없이 접근 가능
-  sos_token_env:   "SOS_INBOUND_TOKEN"     # 미설정 시 인증 없이 접근 가능
-  token_env:       "FLUSH_INBOUND_TOKEN"   # flush/drain 공용 토큰 환경변수명
-```
-
-
-
-### GET /stat — 현재 시스템 상태
-
-```bash
-curl -s http://agent-host:9100/stat \
-  -H "Authorization: Bearer ${STAT_INBOUND_TOKEN}" \
-  --compressed | python3 -m json.tool
-```
-
-응답: `stat_snapshot` envelope
-
-### POST /trigger-sos — SOS 풀 진단
-
-```bash
-curl -s -X POST http://agent-host:9100/trigger-sos \
-  -H "Authorization: Bearer ${SOS_INBOUND_TOKEN}" \
-  --compressed | python3 -m json.tool
-```
-
-응답: `sos_snapshot` envelope (최근 4시간 로그 포함, 타임아웃 120초 이상 권장)
-
-### POST /flush — 현재 cycle 즉시 방출 (디버그용)
-
-> **주의**: `/flush`는 현재 cycle의 envelope을 HTTP **응답 바디**로 직접 반환합니다.
-> 수신측 `/ingest`로 전송되는 경로가 **아닙니다**. 호출 시 현재 cycle이 즉시 종료되고 seq가 1 증가합니다.
-
-```bash
-curl -s -X POST http://agent-host:9100/flush \
-  -H "Authorization: Bearer ${FLUSH_INBOUND_TOKEN}" \
-  --compressed | python3 -m json.tool
-```
-
-
-
-### POST /drain-spool — retry/ 파일 재전송
-
-`retry/`에 쌓인 전송 실패 envelope을 지정한 시간 창 내에서 재전송합니다.
-
-```bash
-# 특정 30분 창의 파일 재전송
-curl -s -X POST \
-  "http://agent-host:9100/drain-spool?from=2026-05-01T00:00:00Z&to=2026-05-01T00:30:00Z" \
-  -H "Authorization: Bearer ${FLUSH_INBOUND_TOKEN}"
-```
-
-응답 (202 Accepted):
-
-```json
-{ "drain_id": "01JXYZ...", "window": {...}, "queued": 47, "bytes": 450000 }
-```
-
-- 전송은 백그라운드에서 진행되므로 즉시 `202` 반환
-- `409`: 이미 drain 진행 중 — `drain_id`·`remaining`·`started_at`·`window` 반환
-- `400`: from/to 파싱 실패 또는 `from >= to`
-- `from`/`to`: RFC3339 형식, ULID 생성 시각 기준 필터링
-
-
-
-### GET /drain-status — drain 진행 상황 조회
-
-```bash
-curl -s http://agent-host:9100/drain-status \
-  -H "Authorization: Bearer ${FLUSH_INBOUND_TOKEN}"
-```
-
-응답:
-
-```json
-{
-  "drain_id": "01JXYZ...", "status": "in_progress",
-  "window": {"from": "2026-05-01T00:00:00Z", "to": "2026-05-01T00:30:00Z"},
-  "queued": 47, "remaining": 23, "succeeded": 20, "failed": 4,
-  "started_at": "2026-05-11T09:00:00Z", "completed_at": null,
-  "spool_new_bytes": 102400, "spool_retry_count": 12
-}
-```
-
-
-| `status`      | 의미           |
-| ------------- | ------------ |
-| `idle`        | drain 이력 없음  |
-| `in_progress` | drain 진행 중   |
-| `completed`   | 마지막 drain 완료 |
-
-
-
-
-### 에러 응답 코드 (에이전트 → 수신측 pull 응답)
-
-> 수신측이 에이전트의 pull API(`/stat`·`/flush`·`/trigger-sos`·`/drain-spool`)를 호출했을 때 **에이전트가 돌려주는** 코드. (반대 방향인 push 응답은 위 [수신 엔드포인트 구현 요건](#수신-엔드포인트-구현-요건)의 "응답 코드" 참조)
-
-| 코드    | 의미                                                                                                      |
-| ----- | ------------------------------------------------------------------------------------------------------- |
-| `200` | 성공 (body: gzip JSON)                                                                                    |
-| `202` | drain 작업 시작됨                                                                                            |
-| `400` | from/to 파라미터 파싱 실패 또는 `from >= to`                                                                      |
-| `401` | 토큰 인증 실패                                                                                                |
-| `409` | 이미 처리 중 (flush 또는 drain 중복 호출)                                                                          |
-| `413` | envelope 크기 초과 (`envelope_size_limit_mb` 설정, JSON 직렬화 기준)                                               |
-| `429` | **에이전트 측 Rate limit** (`/flush`: 기본 6회/시간, `/stat`·`/trigger-sos`: 기본 60회/시간, `rate_limit_per_hour` 설정) |
-| `503` | `/flush` — wait 모드 타임아웃 또는 coordinator 채널 종료 시                                                          |
-
+| 엔드포인트 | 용도 | 토큰 | 응답 |
+|---|---|---|---|
+| `GET /stat` | 현재 시스템 상태 | STAT | `stat_snapshot` |
+| `POST /trigger-sos` | SOS 진단(최근 4h 로그) | SOS | `sos_snapshot` (타임아웃 120s+) |
+| `POST /flush` | 현재 cycle 즉시 방출(디버그) | FLUSH | envelope (응답 바디, `/ingest` 아님) |
+| `POST /drain-spool?from&to` | `retry/` 재전송 | FLUSH | `202` (백그라운드) |
+| `GET /drain-status` | drain 진행 조회 | FLUSH | idle/in_progress/completed |
 
 ---
-
-
 
 ## 중복 수신 방지
 
@@ -563,10 +314,7 @@ curl -s http://agent-host:9100/drain-status \
 
 ---
 
-
-
 ## 재시도 정책
-
 
 | 상황                         | 에이전트 동작                                                                                              |
 | -------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -575,28 +323,15 @@ curl -s http://agent-host:9100/drain-status \
 | 일반 envelope                | 기본 **5회 재시도** 후 포기 (`transport.retry_max_normal` 설정, 초기 전송 포함 최대 6회) — `retry/`로 이동 (drain API로 재전송) |
 | 수신측 4xx                    | 즉시 포기, spool 파일 `retry/`로 이동 (drain API로 재전송)                                                        |
 
-
 `new/` spool 용량 초과 시 가장 오래된 파일을 `retry/`로 이동한 뒤 새 envelope을 저장합니다. 수신측 다운이 길어질 것으로 예상되면 `transport.spool_max_mb`를 늘리세요.
 
 ---
 
-
-
 ## 운영 권장 사항
-
-
 
 ### 호스트 침묵 감지
 
-에이전트는 30분마다 전송합니다. **35분** 이상 `log_batch`가 오지 않으면 해당 호스트를 점검하세요.
-
-```python
-for host_id, last_seen in host_last_seen.items():
-    if datetime.utcnow() - last_seen > timedelta(minutes=35):
-        alert(f"{host_id} 침묵 — 에이전트 다운 또는 네트워크 단절")
-```
-
-
+에이전트는 30분마다 전송합니다. **35분** 이상 `log_batch`가 오지 않으면 해당 호스트를 점검하세요(에이전트 다운·네트워크 단절 의심).
 
 ### 사고 발생 시 흐름
 
@@ -605,22 +340,11 @@ for host_id, last_seen in host_last_seen.items():
 3. `POST :9100/trigger-sos` 호출 → 최근 4시간 상세 로그 + 전체 시스템 상태 수집
 4. `fingerprint`로 동일 패턴이 다른 서버에도 퍼져 있는지 확인
 
-
-
 ### fingerprint 활용
 
-서버 간 같은 `fingerprint`가 동시에 발생하면 인프라 공통 장애를 의심하세요.
-
-```python
-affected = [
-    host for host, events in host_events.items()
-    if any(e["fingerprint"] == target_fp for e in events)
-]
-```
+서버 간 같은 `fingerprint`가 동시에 발생하면 인프라 공통 장애를 의심하세요(같은 지문 = 같은 사건 패턴이 여러 호스트에 확산).
 
 ---
-
-
 
 ## 구현 예시 (수신측)
 
@@ -655,10 +379,7 @@ kill -TERM <PID>
 
 ---
 
-
-
 ## 환경변수 요약
-
 
 | 환경변수                  | 용도                                                        | 필수                   |
 | --------------------- | --------------------------------------------------------- | -------------------- |
@@ -670,10 +391,7 @@ kill -TERM <PID>
 | `FIELDS_PATH`         | fields.yaml 경로 (기본 `/etc/log_parser/fields.yaml`)         | 선택                   |
 | `RUST_LOG`            | 로그 레벨 (`info` / `debug` / `warn`)                         | 선택                   |
 
-
 ---
-
-
 
 ## 디렉토리 구조
 
@@ -695,12 +413,11 @@ log_parser/
 ├── data/spool/                 # 런타임 spool WAL (Docker mount point)
 ├── Dockerfile
 ├── docker-compose.yml
+├── CHANGELOG.md                # 변경 이력
 └── Cargo.toml
 ```
 
 ---
-
-
 
 ## 읽기 순서
 
@@ -717,44 +434,6 @@ log_parser/
 
 ---
 
-
-
 ## 변경 이력
 
-> 최신 항목을 위에 추가한다.
-
-
-
-### 2026-07-15 — 핫패스 성능·spool 안정성 개선 + 인수인계 문서 정비
-
-수집·파싱 **방법론은 그대로** 두고(이미 적정), 출력(템플릿·지문) 불변인 성능 개선과 운영 안전성만 손봤다. 그리고 대규모 확장 시의 책임 경계·계약을 문서로 확정했다.
-
-| 구분 | 내용 |
-|------|------|
-| 핫패스 성능 | 죽은 serde flatten 제거, 정규화 12패스 `RegexSet`+`Cow`, severity `aho-corasick` 단일 패스, 중복 라인 lazy extraction, logfmt 가드 — 라인당 CPU·할당 감소(출력 동일) |
-| spool 안전 | `retry/` 데드레터 **용량 상한 + TTL**(무제한 디스크 성장 차단), **compress-once**(재시도마다 재직렬화·재gzip 제거) |
-| 대규모 계약 | `docs/6_SCALE_CONTRACT.md` 신설 — 증분 pull(`since_seq`)·이벤트 스토어는 **미채택**, 중앙 플랫폼은 기존 push/스냅샷으로 소비. 책임 경계(저장은 중앙 몫)를 루트 README 상단에 명시 |
-| 인수인계 | `docs/README.md` 색인, `reference/stack/`에 수신측 산출물(playbook·goldset) 스냅샷 추가 |
-
-### 2026-07-01 — Promtail 파이프라인 벤치마킹
-
-Promtail(Grafana Loki의 수집 에이전트)이 *"날것의 로그를 그대로 보내지 않고 파이프라인 스테이지로 가공한 뒤 보낸다"* 는 방식을 벤치마킹해, **수집 단계의 정제 능력**을 끌어올렸다. 차용한 개념과 이 프로젝트의 구현 대응은 다음과 같다.
-
-
-| Promtail 개념               | 하는 일                                   | log_parser 구현                                                                     |
-| ------------------------- | -------------------------------------- | --------------------------------------------------------------------------------- |
-| **multiline**             | 여러 줄 로그(자바 스택트레이스·커널 콜트레이스)를 한 덩어리로 묶음 | Vector `multiline` — 타임스탬프 헤더로 시작하는 줄을 새 이벤트로 보고 후속 줄 병합(`halt_before`)           |
-| **drop**                  | 필요 없는 잡음 로그를 버려 저장·전송량 절감              | Vector `drop_noise` 필터(기본: journald debug 제거)                                     |
-| **regex / logfmt / json** | 메시지에서 구조화 필드 추출                        | `fields.yaml` — 정규식 캡처 + `logfmt`/`json` 자동 승격(allow 화이트리스트·개수 상한)                |
-| **match**                 | 조건에 맞는 로그를 분류·라우팅                      | `categories.yaml` — aho-corasick 리터럴 선별 후 정규식 first-match, `program`/`logger` 게이트 |
-
-
-**반영한 개선**
-
-- **설정 주도화** — 필드 추출을 소스 하드코딩에서 `fields.yaml` 로딩형으로 전환(코드 변경·재빌드 없이 규칙 추가).
-- **logfmt/JSON 자동 파싱** — 앱 로그의 `key=value`·JSON 객체를 필드로 승격(auditd 처럼 폭주하는 로그를 막는 allow 화이트리스트·개수 상한 포함).
-- **배포 완결** — `fields.yaml`을 컨테이너 `/etc/log_parser/`로 마운트하도록 `docker-compose.yml` 보강(신규 설정 파일 배치 누락 수정).
-- **user 필드 정밀화** — `session opened for user root(uid=0)` 로그에서 `(uid=0)` 꼬리표를 잘라 `root`로 정규화(값 파편화 방지). 하이픈·점 포함 계정명(`www-data`·`user.name`)은 보존.
-
-> 각 단계가 실제로 어떻게 이어지는지는 [전체 흐름](#전체-흐름)과 [로그 한 줄이 처리되는 과정](#로그-한-줄이-처리되는-과정-단계별) 참조.
-
+전체 변경 이력은 [`CHANGELOG.md`](CHANGELOG.md) 참조.
