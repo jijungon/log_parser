@@ -114,8 +114,12 @@ mod tests {
 
     #[test]
     fn probe_syslog_true_for_existing_file() {
-        // /proc/version always exists on Linux — use it as a stand-in
-        let p = probe("/nonexistent/vector", "/proc/version", "/nonexistent/auth");
+        // The running test binary is guaranteed to exist on every platform — use it as an
+        // "existing file" stand-in. (Previously /proc/version, which only exists on Linux and
+        // made this test always fail on macOS.)
+        let existing = std::env::current_exe().expect("test binary path should be resolvable");
+        let existing = existing.to_str().expect("test binary path should be valid UTF-8");
+        let p = probe("/nonexistent/vector", existing, "/nonexistent/auth");
         assert!(p.syslog_ok, "existing path should set syslog_ok");
         assert!(!p.auth_ok);
     }
