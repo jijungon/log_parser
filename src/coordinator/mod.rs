@@ -394,14 +394,34 @@ mod tests {
     }
 
     fn make_spool() -> Arc<Spool> {
-        let dir =
-            std::env::temp_dir().join(format!("spool_backoff_{}_{}", std::process::id(), rand_u64()));
+        let dir = unique_temp_dir("spool_backoff");
         Arc::new(Spool::new(dir.to_str().unwrap(), 10).unwrap())
     }
 
-    fn rand_u64() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64
+    /// Returns a process-unique temp dir path for test isolation.
+    ///
+    /// Parallel tests all share one process, so `process::id()` alone is NOT unique between
+    /// them, and `subsec_nanos()` can collide when two tests start within the same nanosecond
+    /// bucket. A shared dir is fatal here because every test ends with `remove_dir_all(base)`,
+    /// so one test would wipe another's spool files mid-assertion → intermittent failures under
+    /// `cargo test` (parallel) that vanish under `--test-threads=1`.
+    ///
+    /// The atomic counter guarantees every call within this run yields a distinct dir (fixing the
+    /// parallel race); the nanosecond clock adds entropy across separate test-binary runs; the pid
+    /// separates concurrent `cargo test` processes.
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        use std::time::UNIX_EPOCH;
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "log_parser_{tag}_{}_{seq}_{nanos}",
+            std::process::id()
+        ))
     }
 
     fn test_envelope() -> Envelope {
@@ -509,9 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn persist_seq_writes_and_reads_back() {
-        let dir = std::env::temp_dir().join(
-            format!("test_persist_seq_{}_{}", std::process::id(), rand_u64())
-        );
+        let dir = unique_temp_dir("persist_seq");
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("seq.state");
         let path_str = path.to_str().unwrap();
