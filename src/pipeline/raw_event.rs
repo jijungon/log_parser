@@ -20,10 +20,9 @@ pub struct RawLogEvent {
     pub file_message: Option<String>,
     #[serde(rename = "file")]
     pub file_path: Option<String>,
-    // Catch-all for any additional Vector-provided fields; kept to prevent deserialization failure.
-    #[allow(dead_code)]
-    #[serde(flatten)]
-    pub extra: serde_json::Value,
+    // NOTE: Vector가 보내는 추가 필드는 serde 기본 동작으로 무시된다 (deny_unknown_fields 미사용).
+    // 과거의 #[serde(flatten)] catch-all은 serde Content 버퍼링을 강제해 라인당 파싱 비용을
+    // 약 2배로 만들었고, 값은 어디서도 읽히지 않아 제거함.
 }
 
 impl RawLogEvent {

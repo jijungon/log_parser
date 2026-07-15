@@ -101,7 +101,8 @@ async fn main() -> Result<()> {
 
     let spool = Arc::new(
         transport::spool::Spool::new(&cfg.transport.spool_dir, cfg.transport.spool_max_mb)
-            .context("spool 초기화 실패")?,
+            .context("spool 초기화 실패")?
+            .with_retry_limits(cfg.transport.retry_max_mb, cfg.transport.retry_ttl_hours),
     );
     let transport = transport::create(&cfg.transport).context("transport 초기화 실패")?;
 

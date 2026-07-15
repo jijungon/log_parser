@@ -31,6 +31,37 @@ impl DedupWindow {
         }
     }
 
+    /// 윈도우 안의 기존 항목이면 병합하고 true 반환.
+    /// 병합 경로에서는 fields/category 계산이 필요 없으므로, 호출자는
+    /// try_merge가 false일 때만 필드 추출·분류를 수행하고 push()를 부른다
+    /// (중복 라인마다 계산 후 버려지던 낭비 제거 — 병합 시 push()가 인자를 무시하던 것과 동일 의미).
+    pub fn try_merge(
+        &mut self,
+        fingerprint: u64,
+        raw: &str,
+        ts: DateTime<Utc>,
+        severity: &str,
+    ) -> bool {
+        if let Some(state) = self.cache.get_mut(&fingerprint) {
+            let elapsed = (ts - state.ts_last).num_seconds();
+            if elapsed < self.window_secs {
+                // 윈도우 안: 병합 (순서 역전된 이벤트는 ts_last를 뒤로 당기지 않음)
+                state.count += 1;
+                if ts > state.ts_last {
+                    state.ts_last = ts;
+                }
+                if state.sample_raws.len() < 3 {
+                    state.sample_raws.push(raw.to_string());
+                }
+                if severity == "critical" && state.severity != "critical" {
+                    state.severity = severity.to_string();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     /// 이벤트 하나를 처리. 윈도우 만료 시 DedupEvent 반환.
     pub fn push(
         &mut self,

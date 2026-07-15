@@ -38,12 +38,18 @@ impl HttpJsonTransport {
         })
     }
 
+    /// envelope을 직렬화·압축해 1회 전송. (drain 등 재시도 루프 밖 단발 호출용)
+    /// 재시도 루프에서는 `compress()`로 1회 압축 후 `send_compressed()`를 반복 호출해
+    /// 매 시도마다 재직렬화·재압축하는 낭비를 피한다.
     pub async fn send(&self, envelope: &Envelope) -> Result<(), TransportError> {
         let json = serde_json::to_vec(envelope)
             .map_err(|e| TransportError::Fatal(format!("JSON 직렬화 실패: {e}")))?;
-
         let body = self.compress(&json)?;
+        self.send_compressed(body).await
+    }
 
+    /// 이미 gzip 압축된 body를 그대로 POST. 재시도 시 동일 body를 재사용한다.
+    pub async fn send_compressed(&self, body: Vec<u8>) -> Result<(), TransportError> {
         let resp = self
             .client
             .post(&self.endpoint)

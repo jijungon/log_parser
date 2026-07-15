@@ -123,13 +123,30 @@ static PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
     ]
 });
 
+// PATTERNS 전체를 한 번의 멀티패턴 스캔으로 검사하는 프리필터.
+// placeholder 문자열(<UUID> 등)은 숫자·콜론·슬래시·0x를 포함하지 않으므로
+// 앞선 치환이 뒤 패턴의 "새로운" 매치를 만들어낼 수 없다 → 원본 기준 판정이 안전하다.
+static PATTERN_SET: Lazy<regex::RegexSet> = Lazy::new(|| {
+    regex::RegexSet::new(PATTERNS.iter().map(|(re, _)| re.as_str())).unwrap()
+});
+
 /// 가변 토큰을 placeholder로 치환 → 정규화된 template 반환
 pub fn normalize(msg: &str) -> String {
-    let mut s = msg.to_string();
-    for (re, placeholder) in PATTERNS.iter() {
-        s = re.replace_all(&s, *placeholder).into_owned();
+    use std::borrow::Cow;
+    let matched = PATTERN_SET.matches(msg);
+    if !matched.matched_any() {
+        return msg.to_string();
     }
-    s
+    let mut s: Cow<'_, str> = Cow::Borrowed(msg);
+    for (idx, (re, placeholder)) in PATTERNS.iter().enumerate() {
+        if !matched.matched(idx) {
+            continue;
+        }
+        if let Cow::Owned(new) = re.replace_all(&s, *placeholder) {
+            s = Cow::Owned(new);
+        }
+    }
+    s.into_owned()
 }
 
 #[cfg(test)]
