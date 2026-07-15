@@ -32,6 +32,28 @@
 
 ---
 
+## 사전 요건 · 빠른 시작 (새 서버 bring-up)
+
+**사전 요건**
+- **Linux 호스트** — journald/syslog·`/proc`·cgroup에 의존한다(macOS·Windows에선 실행 불가, 단위 테스트만 가능). 로컬 검증은 Docker로.
+- **Vector 실행 파일** — 에이전트가 로그 수집기로 Vector를 **자식 프로세스로 띄운다**. 기본 경로 `/app/vector/bin/vector`(agent.yaml `pipeline.vector_bin`으로 변경 가능). Docker 실행 시 `docker-compose.yml`이 호스트의 `/app/vector`를 마운트하므로 **호스트에 Vector가 설치돼 있어야 한다** — 없으면 수집이 시작되지 않는다.
+- **토큰 4개** — `PUSH/FLUSH/STAT/SOS_INBOUND_TOKEN`. 하나라도 미설정이면 **기동 거부**. 채우는 법은 아래 [환경변수 요약](#환경변수-요약).
+- 소스 빌드 시 Rust 툴체인, 또는 Docker.
+
+**빠른 시작 — Docker (권장)**
+```bash
+cp config/.env.example config/.env      # 토큰 4개 채우기 (환경변수 요약 참조)
+docker compose up -d --build            # agent_docker.yaml로 기동, :9100 노출
+docker compose logs -f log-parser       # 기동·수집 로그 확인
+```
+> compose에 기본 토큰값이 내장돼 있어 `.env` 없이도 뜨지만, **실배포에선 반드시 교체**한다.
+
+**동작 검증**
+- 즉시 확인: `curl -H "Authorization: Bearer <STAT_INBOUND_TOKEN>" http://127.0.0.1:9100/stat`
+- 전 경로 E2E: [`tests/`](tests/) 하네스 참조 — 합성 에러 로그 주입(`inject_errors.sh`) → 파서 수집·분류 → (수신측)답변까지 자동 검증. 상세는 [`tests/README.md`](tests/README.md).
+
+---
+
 ## ⭐ 가장 중요한 파일 (반드시 직접 관리)
 
 각 파일이 하는 일은 다음과 같다.
@@ -987,10 +1009,10 @@ cargo build --release
 # 디렉터리 준비
 mkdir -p /run/log_parser /var/lib/log_parser/spool/new /var/lib/log_parser/spool/retry /etc/log_parser
 
-# 분류·필드 규칙 배치 (기본 경로: /etc/log_parser/)
-cp config/categories.yaml config/fields.yaml /etc/log_parser/
+# 설정·분류·필드 규칙 배치 (기본 경로: /etc/log_parser/)
+cp config/agent.yaml config/categories.yaml config/fields.yaml /etc/log_parser/
 
-# 환경변수 설정
+# 환경변수 설정 (토큰 4개 — 아래 "환경변수 요약" 참조)
 cp config/.env.example config/.env   # 토큰 값 입력
 
 # 실행
