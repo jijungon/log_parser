@@ -8,7 +8,7 @@
 
 이 스냅샷은 **중앙 플랫폼(수신측)** 것이다. 파서는 로그 저장·조회·분석을 책임지지 않으며,
 "어떻게 저장·소비하는가"는 받는 쪽 설계다. 관련 문서:
-- 파서 출력 계약 + 저장이 왜 중앙 몫인지: [`../../docs/6_SCALE_CONTRACT.md`](../../docs/6_SCALE_CONTRACT.md)
+- 파서 출력 계약 + 저장이 왜 중앙 몫인지: [`../../docs/scale-contract.md`](../../docs/scale-contract.md)
 - 파서 책임 경계 요약: 루트 [`README.md`](../../README.md) "설계 의도 · 책임 경계"
 - 중앙 플랫폼 로드맵: `log_stack_AI/docs/1_CENTRAL_PLATFORM_ROADMAP.md` (별도 repo)
 

@@ -78,7 +78,7 @@ flowchart TD
 | **⑥ 중복 묶기** (`dedup`)        | 30초 안에 **똑같은 로그가 여러 번** 오면 하나로 합치고 횟수만 센다                                         | 같은 `fingerprint` 병합, 발생 수 누적, 원본 샘플 보존                                           | 묶인 `DedupEvent` (`count` 포함)        |
 | **⑦ 조립·전송** (`coordinator`)  | 30분치를 모아 **한 봉투(Envelope)로 싸서** 수신 서버로 보낸다                                        | 카테고리·심각도 집계, 사이클·헤더 메타 부착                                                        | `Envelope` → HTTP POST              |
 
-> 최종 산출물 `DedupEvent`·카테고리 목록의 타입 정의는 [`RECEIVER_TYPE_SPEC.md`](RECEIVER_TYPE_SPEC.md).
+> 최종 산출물 `DedupEvent`·카테고리 목록의 타입 정의는 [`receiver-type-spec.md`](receiver-type-spec.md).
 
 ### ④ 분류 · ⑤ 필드 추출 · ⑥ 중복 묶기 — 뭐가 다른가
 

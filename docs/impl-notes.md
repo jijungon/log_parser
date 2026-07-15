@@ -1,6 +1,6 @@
-# IMPL_NOTES — 구현 참조
+# impl-notes — 구현 참조
 
-> 2_MASTER_PLAN.md에서 분리한 코드 수준 세부사항. 구현 단계에서 참조.
+> master-plan.md에서 분리한 코드 수준 세부사항. 구현 단계에서 참조.
 
 ---
 

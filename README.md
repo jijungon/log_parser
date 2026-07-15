@@ -27,7 +27,7 @@
 | [`docs/`](docs/) | 설계·계약 — 파서가 **무엇을 내보내는가**, 그리고 저장은 왜 중앙 몫인가 | 파서 소유(정본) |
 | [`reference/`](reference/) | 중앙(수신측 `log_stack_AI`)의 산출물 **참조 스냅샷** — 정본 아님 | 읽기 전용 사본 |
 
-- 저장을 중앙이 어떻게 할지 정한 **계약**: [`docs/6_SCALE_CONTRACT.md`](docs/6_SCALE_CONTRACT.md) (증분 pull·이벤트 스토어는 미채택, 기존 push/스냅샷으로 소비하기로 결정)
+- 저장을 중앙이 어떻게 할지 정한 **계약**: [`docs/scale-contract.md`](docs/scale-contract.md) (증분 pull·이벤트 스토어는 미채택, 기존 push/스냅샷으로 소비하기로 결정)
 - 중앙 플랫폼을 실제로 짓는 **로드맵**: `log_stack_AI/docs/1_CENTRAL_PLATFORM_ROADMAP.md` (별도 repo)
 
 ---
@@ -214,7 +214,7 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 
 ## 데이터 구조
 
-> 수신측 서버를 구성할 때는 `[docs/RECEIVER_TYPE_SPEC.md](docs/RECEIVER_TYPE_SPEC.md)`를 참조하세요.
+> 수신측 서버를 구성할 때는 `[docs/receiver-type-spec.md](docs/receiver-type-spec.md)`를 참조하세요.
 > Envelope·DedupEvent·최대 7개 섹션(metrics/processes/network/systemd/static_state/config/hardware) 전체의 상세 타입 정의와 제약 조건이 정리되어 있습니다.
 
 ### 세 가지 Envelope 한눈 비교
@@ -244,17 +244,17 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 
 ---
 
-### 상세 타입 정의 → `docs/RECEIVER_TYPE_SPEC.md`
+### 상세 타입 정의 → `docs/receiver-type-spec.md`
 
-Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마, **DedupEvent**, **Category 분류표**, 7개 섹션(metrics·processes·network·systemd·static_state·config·hardware) 타입은 전부 [`docs/RECEIVER_TYPE_SPEC.md`](docs/RECEIVER_TYPE_SPEC.md)에 정리돼 있다(**정본**). 여기서는 핵심만:
+Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마, **DedupEvent**, **Category 분류표**, 7개 섹션(metrics·processes·network·systemd·static_state·config·hardware) 타입은 전부 [`docs/receiver-type-spec.md`](docs/receiver-type-spec.md)에 정리돼 있다(**정본**). 여기서는 핵심만:
 
 - **event_kind** — `log_batch`(30분 자동 push) · `stat_snapshot`(GET /stat) · `sos_snapshot`(POST /trigger-sos)
 - **중복 방지 키** — `cycle.host_id + boot_id + seq` (seq는 재시작 후에도 이어짐 → [중복 수신 방지](#중복-수신-방지))
 - **DedupEvent 핵심 필드** — `source` · `severity` · `category` · `template` · `fingerprint` · `count` · `sample_raws` · `fields` · `ts_first`/`ts_last`
 - **severity** — `critical`(kernel panic·OOM·oops 등 키워드 감지) / `error` / `warn` / `info`
-- **Category** — 분류 규칙 정본은 [`config/categories.yaml`](config/categories.yaml), 코드별 표는 `RECEIVER_TYPE_SPEC.md` §4
+- **Category** — 분류 규칙 정본은 [`config/categories.yaml`](config/categories.yaml), 코드별 표는 `receiver-type-spec.md` §4
 
-> **수신측 알림 기준(요약)** — `severity=critical` · `kernel.oom`/`kernel.panic` · `fs.readonly`는 즉시 알림, `auth.bruteforce`는 보안 알림, `count>=10`은 에러 폭증. 상세 룰은 [`docs/4_RECEIVER_CONTRACT.md`](docs/4_RECEIVER_CONTRACT.md).
+> **수신측 알림 기준(요약)** — `severity=critical` · `kernel.oom`/`kernel.panic` · `fs.readonly`는 즉시 알림, `auth.bruteforce`는 보안 알림, `count>=10`은 에러 폭증. 상세 룰은 [`docs/receiver-contract.md`](docs/receiver-contract.md).
 
 ---
 
@@ -279,7 +279,7 @@ Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마
 - `boot_id`는 재부팅마다 바뀌므로, 재부팅 전후 `seq`가 겹쳐도 별개 데이터다.
 - `stat_snapshot`/`sos_snapshot`은 `seq` 필드가 없다(키 생략). `ts` 보조 키를 쓰되 초 단위라 같은 초 두 번 호출 시 충돌 → on-demand 응답은 upsert 권장.
 
-> 예시 코드(`is_duplicate`)는 [`examples/receiver_example.py`](examples/receiver_example.py), 계약은 [`docs/4_RECEIVER_CONTRACT.md`](docs/4_RECEIVER_CONTRACT.md).
+> 예시 코드(`is_duplicate`)는 [`examples/receiver_example.py`](examples/receiver_example.py), 계약은 [`docs/receiver-contract.md`](docs/receiver-contract.md).
 
 ---
 

@@ -8,14 +8,14 @@
 
 ## 1. 송출 contract (log_parser → receiver)
 
-> **kind="http_json" 기준** (Phase B default). kind="otlp"는 gRPC+protobuf — `2_MASTER_PLAN.md §7.7.3` 참조.
+> **kind="http_json" 기준** (Phase B default). kind="otlp"는 gRPC+protobuf — `master-plan.md §7.7.3` 참조.
 
 ```
 POST <ingest endpoint, agent.yaml의 transport.endpoint>
 Authorization: Bearer ${INGEST_TOKEN}
 Content-Type: application/json
 Content-Encoding: gzip
-Body: <Envelope JSON, 2_MASTER_PLAN.md §10 schema>
+Body: <Envelope JSON, master-plan.md §10 schema>
 
 Response 2xx (200, 202, 204): 수신 성공. 송신 buffer 비움
 Response 5xx, 429, 네트워크 에러: 재시도 가능 (간격을 점점 늘려가며)
@@ -31,7 +31,7 @@ Response 4xx (401, 403): 치명 오류. 토큰·인증 문제. 알림 로그
 | 인덱싱 | `(host_id, boot_id, window)` 복합 키로 인덱싱 |
 | 중복 방지 | `(host_id, boot_id, seq)` 3개 값이 모두 같으면 같은 데이터로 간주해 한 번만 처리 |
 | body 분석 | severity·category·template·fingerprint 기반 패턴 매칭. 시간순 연결 |
-| Alerting | `1_observability-design.md §9` 권장 룰 셋 (panic 키워드, hw 에러, fs.readonly, 재시작 루프, 에러율 폭증, 부팅 직후, 호스트 침묵) |
+| Alerting | `observability-design.md §9` 권장 룰 셋 (panic 키워드, hw 에러, fs.readonly, 재시작 루프, 에러율 폭증, 부팅 직후, 호스트 침묵) |
 | 상세 수집 | "사고다" 판단 시 `GET host:9102/stat` + `POST host:9100/flush` + `POST host:9101/trigger-sos` 병렬 호출 |
 | 호스트 침묵 감지 | log_parser envelope 30분 + grace 5분 안에 안 오면 호스트 이상 (host_id 기준) |
 | Cool-down | 같은 호스트·같은 사고로 sos 중복 호출 방지 |
