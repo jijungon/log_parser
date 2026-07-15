@@ -1028,12 +1028,16 @@ pub async fn collect_logs(log_paths: &[String]) -> Value {
                     let fields_map = fields::extract_fields(stripped);
                     let sev = severity::finalize("info", stripped);
 
+                    // fingerprint 공식은 coordinator(push 경로, coordinator/mod.rs)와 동일해야
+                    // 같은 로그가 두 경로에서 같은 지문을 갖는다: xxh3(template | severity | source)
                     let fingerprint = {
                         use std::hash::Hasher as _;
                         let mut h = xxhash_rust::xxh3::Xxh3::new();
-                        h.write(source.as_bytes());
-                        h.write(b":");
                         h.write(template.as_bytes());
+                        h.write(b"|");
+                        h.write(sev.as_bytes());
+                        h.write(b"|");
+                        h.write(source.as_bytes());
                         h.finish()
                     };
 
