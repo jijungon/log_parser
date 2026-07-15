@@ -91,6 +91,21 @@ goldset = 검색 채점 기준 (점수)
 
 ---
 
+## 📎 참고로 중요한 파일 — 수신측 산출물 (파서 소유 아님)
+
+> 위 `config/*.yaml` 은 **파서가 소유·직접 관리**하는 정본이다.
+> 아래 둘은 성격이 다르다 — **중앙(수신측 `log_stack_AI`)의 산출물**이고, 여기 있는 건 인수인계용 **읽기 전용 스냅샷**이다.
+> **이 파일들은 여기서 편집하지 않는다. 정본은 `log_stack_AI`.** (파서는 로그 저장·검색·답변을 책임지지 않는다 — [설계 의도 · 책임 경계](#설계-의도--책임-경계-먼저-읽기) 참조)
+
+| 파일 | 무엇 | 정본 위치 |
+|------|------|-----------|
+| [`reference/stack/playbook.yaml`](reference/stack/playbook.yaml) | 카테고리별 원인·확인명령·표준대처 지식 (수신측 분석 LLM 프롬프트에 주입) | `log_stack_AI/playbook.yaml` |
+| [`reference/stack/goldset.yaml`](reference/stack/goldset.yaml) | 검색 품질 평가용 정답셋 (질문 + 정답 uid) | `log_stack_AI/goldset/goldset.yaml` |
+
+이 둘을 여기 둔 이유: 위 `config/categories.yaml` 을 바꾸면 **반드시 같이 갱신해야** 하는 하류 파일이라, 카테고리 변경 시 무엇이 함께 바뀌는지 실물로 보라고 스냅샷을 둔 것이다. 사본은 자동 갱신되지 않는다 — 동기화 방법은 [`reference/stack/README.md`](reference/stack/README.md) 참조.
+
+---
+
 
 
 
