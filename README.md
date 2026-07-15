@@ -147,7 +147,7 @@ flowchart LR
 
 > **Vector 수집** — 파일 소스의 여러 줄 로그(스택트레이스)를 타임스탬프 헤더 기준 **한 이벤트로 병합**(multiline)하고 **노이즈 필터(drop_noise)**로 잡음(기본 journald debug)을 버린다. `vector.toml`은 distro 감지로 **자동 생성**(직접 편집 안 함).
 >
-> 흐름 다이어그램(push/pull)과 로그 한 줄이 거치는 **7단계 상세**는 [`docs/8_PIPELINE.md`](docs/8_PIPELINE.md).
+> 흐름 다이어그램(push/pull)과 로그 한 줄이 거치는 **7단계 상세**는 [`docs/pipeline.md`](docs/pipeline.md).
 
 ---
 
@@ -285,7 +285,7 @@ Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마
 
 ## On-demand Pull API
 
-에이전트가 `127.0.0.1:9100`에서 제공하는 pull 엔드포인트(수신측이 필요 시 호출). 원격 호출은 `agent.yaml`의 `inbound.listen_addr` + 방화벽. **curl 예시·파라미터·에러 코드 상세는 [`docs/7_PULL_API.md`](docs/7_PULL_API.md).**
+에이전트가 `127.0.0.1:9100`에서 제공하는 pull 엔드포인트(수신측이 필요 시 호출). 원격 호출은 `agent.yaml`의 `inbound.listen_addr` + 방화벽. **curl 예시·파라미터·에러 코드 상세는 [`docs/pull-api.md`](docs/pull-api.md).**
 
 | 엔드포인트 | 용도 | 토큰 | 응답 |
 |---|---|---|---|
