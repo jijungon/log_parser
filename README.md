@@ -8,6 +8,30 @@
 
 ---
 
+## 설계 의도 · 책임 경계 (먼저 읽기)
+
+이 프로젝트가 왜 이렇게 나뉘어 있는지 이해하려면 **책임 경계** 하나만 잡으면 된다.
+
+**파서(엣지)가 하는 일 = 수집 → 정제(정규화·dedup) → 압축 → 전송.** 그게 전부다.
+감시 대상 호스트마다 얹혀 도는 에이전트라 **의도적으로 가볍게**(cgroup 기본 메모리 128MB / CPU 5%) 묶여 있다.
+
+**파서가 하지 않는 일 = 저장·조회·분석·검색.** 로그를 오래 쌓아두거나(DB·시계열), 의미 검색(벡터)하거나, 대시보드로 집계하는 것은 **전부 중앙 플랫폼(수신측)의 몫**이다. 파서는 데이터 저장 방식을 책임지지 않는다 — 처리해서 내보낼 뿐이고, "어떻게 저장·질의할지"는 받는 쪽이 정한다.
+
+> **왜 이 경계인가**: 파서는 고객의 실제 서비스가 도는 호스트에 얹혀산다. 거기에 DB·벡터엔진을 심으면 감시 대상과 자원을 다투고 "경량 에이전트" 정체성이 깨진다. 그래서 무거운 저장·분석은 감시 대상 밖의 중앙으로 전부 뺀다.
+
+이 경계가 디렉토리 구성으로 그대로 드러난다:
+
+| 위치 | 담당 | 성격 |
+|------|------|------|
+| [`config/`](config/) | 파서가 **무엇을 어떻게 처리하는가** (분류·필드·전송 설정) | 파서 소유(정본) |
+| [`docs/`](docs/) | 설계·계약 — 파서가 **무엇을 내보내는가**, 그리고 저장은 왜 중앙 몫인가 | 파서 소유(정본) |
+| [`reference/`](reference/) | 중앙(수신측 `log_stack_AI`)의 산출물 **참조 스냅샷** — 정본 아님 | 읽기 전용 사본 |
+
+- 저장을 중앙이 어떻게 할지 정한 **계약**: [`docs/6_SCALE_CONTRACT.md`](docs/6_SCALE_CONTRACT.md) (증분 pull·이벤트 스토어는 미채택, 기존 push/스냅샷으로 소비하기로 결정)
+- 중앙 플랫폼을 실제로 짓는 **로드맵**: `log_stack_AI/docs/1_CENTRAL_PLATFORM_ROADMAP.md` (별도 repo)
+
+---
+
 ## ⭐ 가장 중요한 파일 (반드시 직접 관리)
 
 각 파일이 하는 일은 다음과 같다.
@@ -64,6 +88,21 @@ goldset = 검색 채점 기준 (점수)
 (질문 시점) 검색+게이트 → playbook 답변 ← 질문할 때
 (측정, 따로) goldset 채점 ← 평가하고 싶을 때 수동
 ```
+
+---
+
+## 📎 참고로 중요한 파일 — 수신측 산출물 (파서 소유 아님)
+
+> 위 `config/*.yaml` 은 **파서가 소유·직접 관리**하는 정본이다.
+> 아래 둘은 성격이 다르다 — **중앙(수신측 `log_stack_AI`)의 산출물**이고, 여기 있는 건 인수인계용 **읽기 전용 스냅샷**이다.
+> **이 파일들은 여기서 편집하지 않는다. 정본은 `log_stack_AI`.** (파서는 로그 저장·검색·답변을 책임지지 않는다 — [설계 의도 · 책임 경계](#설계-의도--책임-경계-먼저-읽기) 참조)
+
+| 파일 | 무엇 | 정본 위치 |
+|------|------|-----------|
+| [`reference/stack/playbook.yaml`](reference/stack/playbook.yaml) | 카테고리별 원인·확인명령·표준대처 지식 (수신측 분석 LLM 프롬프트에 주입) | `log_stack_AI/playbook.yaml` |
+| [`reference/stack/goldset.yaml`](reference/stack/goldset.yaml) | 검색 품질 평가용 정답셋 (질문 + 정답 uid) | `log_stack_AI/goldset/goldset.yaml` |
+
+이 둘을 여기 둔 이유: 위 `config/categories.yaml` 을 바꾸면 **반드시 같이 갱신해야** 하는 하류 파일이라, 카테고리 변경 시 무엇이 함께 바뀌는지 실물로 보라고 스냅샷을 둔 것이다. 사본은 자동 갱신되지 않는다 — 동기화 방법은 [`reference/stack/README.md`](reference/stack/README.md) 참조.
 
 ---
 
@@ -998,7 +1037,9 @@ log_parser/
 │   ├── vector.toml             # ⚠ 참고용 스냅샷 — 실배포 설정은 vector_config.rs가 런타임 자동 생성
 │   └── .env.example            # 환경변수 템플릿
 ├── examples/                   # envelope 응답 샘플 (JSON)
-├── docs/                       # 내부 설계 문서
+├── docs/                       # 내부 설계·계약 문서 (docs/README.md = 색인)
+├── reference/stack/            # 수신측(log_stack_AI) 참조 스냅샷 (playbook·goldset, 정본 아님)
+├── tests/                      # E2E 테스트 하네스 (error_cases.yaml·inject_errors.sh)
 ├── data/spool/                 # 런타임 spool WAL (Docker mount point)
 ├── Dockerfile
 ├── docker-compose.yml

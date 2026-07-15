@@ -4,6 +4,14 @@
 > 파서 repo 안에 복사해 둔 것이다. **정본(source of truth)이 아니다.**
 > 스냅샷 시점: 2026-07-15.
 
+## 이 파일들이 속한 곳 (책임 경계)
+
+이 스냅샷은 **중앙 플랫폼(수신측)** 것이다. 파서는 로그 저장·조회·분석을 책임지지 않으며,
+"어떻게 저장·소비하는가"는 받는 쪽 설계다. 관련 문서:
+- 파서 출력 계약 + 저장이 왜 중앙 몫인지: [`../../docs/6_SCALE_CONTRACT.md`](../../docs/6_SCALE_CONTRACT.md)
+- 파서 책임 경계 요약: 루트 [`README.md`](../../README.md) "설계 의도 · 책임 경계"
+- 중앙 플랫폼 로드맵: `log_stack_AI/docs/1_CENTRAL_PLATFORM_ROADMAP.md` (별도 repo)
+
 ## 무엇이 왜 여기 있나
 
 파서의 `config/categories.yaml`(카테고리 체계)이 **시스템 전체의 뼈대**라서, 수신측의

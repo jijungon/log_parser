@@ -3,8 +3,6 @@ data/spool/*
 !data/spool/.gitkeep
 .env
 test_server/storage/*.jsonl
-docs/sos-domain/
-next_step.md
 
 # Claude Code 로컬/런타임 파일 (개인 설정·락 — 커밋 대상 아님)
 .claude/settings.local.json
