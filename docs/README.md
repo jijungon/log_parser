@@ -14,6 +14,7 @@ log_parser(서버측 파서) 설계·구현·수신측 계약 문서 모음. 처
 
 | 문서 | 내용 |
 |------|------|
+| [install.md](install.md) | **설치 · 설정 가이드** — 사전요건·Docker/소스 설치·agent.yaml 설정 키·토큰·검증 |
 | [1_observability-design.md](1_observability-design.md) | 계층형 관측성 설계 — 무엇을·왜 분리하는가 (의미 원칙) |
 | [2_MASTER_PLAN.md](2_MASTER_PLAN.md) | 마스터 플랜 (observability 통합본) — 아키텍처·구현 원칙 총괄 |
 | [3_AGENT_ROLES.md](3_AGENT_ROLES.md) | Agent Role Definitions — 5개 에이전트 역할(생성 주체 WHO) |
