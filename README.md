@@ -37,7 +37,7 @@
 **사전 요건**
 - **Linux 호스트** — journald/syslog·`/proc`·cgroup에 의존한다(macOS·Windows에선 실행 불가, 단위 테스트만 가능). 로컬 검증은 Docker로.
 - **Vector 실행 파일** — 에이전트가 로그 수집기로 Vector를 **자식 프로세스로 띄운다**. 기본 경로 `/app/vector/bin/vector`(agent.yaml `pipeline.vector_bin`으로 변경 가능). Docker 실행 시 `docker-compose.yml`이 호스트의 `/app/vector`를 마운트하므로 **호스트에 Vector가 설치돼 있어야 한다** — 없으면 수집이 시작되지 않는다.
-- **토큰 4개** — `PUSH/FLUSH/STAT/SOS_INBOUND_TOKEN`. 하나라도 미설정이면 **기동 거부**. 채우는 법은 아래 [환경변수 요약](#환경변수-요약).
+- **토큰 4개** — `PUSH/FLUSH/STAT/SOS_INBOUND_TOKEN`. 하나라도 미설정이면 **기동 거부**. 채우는 법은 [`docs/install.md` §3.3](docs/install.md).
 - 소스 빌드 시 Rust 툴체인, 또는 Docker.
 
 **빠른 시작 — Docker (권장)**
@@ -51,6 +51,8 @@ docker compose logs -f log-parser       # 기동·수집 로그 확인
 **동작 검증**
 - 즉시 확인: `curl -H "Authorization: Bearer <STAT_INBOUND_TOKEN>" http://127.0.0.1:9100/stat`
 - 전 경로 E2E: [`tests/`](tests/) 하네스 참조 — 합성 에러 로그 주입(`inject_errors.sh`) → 파서 수집·분류 → (수신측)답변까지 자동 검증. 상세는 [`tests/README.md`](tests/README.md).
+
+> **전체 설치·설정 가이드**(빌드/Docker, `agent.yaml` 설정 키, 토큰, 검증)는 **[`docs/install.md`](docs/install.md)**.
 
 ---
 
@@ -151,41 +153,14 @@ flowchart LR
 
 ---
 
-## 에이전트 연결 설정
+## 설치 · 설정
 
-에이전트 설정 파일(`agent.yaml`)의 `transport` 섹션을 수정합니다.
+설치(Docker·소스 빌드), `agent.yaml` 설정 키(`transport`·`inbound`·`cycle`·`dedup`·`cgroup`·`static_state`), 분류·필드 규칙, **토큰 4개**, 동작 검증까지 전체 절차는 **[`docs/install.md`](docs/install.md)**.
 
-```yaml
-transport:
-  kind: "http_json"
-  endpoint: "https://your-server.example.com/ingest"   # ← 수신측 URL
-  token_env: "PUSH_OUTBOUND_TOKEN"                       # 환경변수명
-  connect_timeout_seconds: 10
-  request_timeout_seconds: 30
-  http_gzip_level: 6
-```
-
-에이전트 실행 환경에 토큰을 환경변수로 주입합니다.
-
-```bash
-export PUSH_OUTBOUND_TOKEN="수신측에서_발급한_Bearer_토큰"
-```
-
-**Docker 사용 시** `docker-compose.yml`:
-
-```yaml
-environment:
-  PUSH_OUTBOUND_TOKEN: "수신측에서_발급한_Bearer_토큰"
-```
-
-> `PUSH_OUTBOUND_TOKEN` · `FLUSH_INBOUND_TOKEN` · `STAT_INBOUND_TOKEN` · `SOS_INBOUND_TOKEN` 중 하나라도 비어있으면 **에이전트 기동이 거부**됩니다.
-
-**호스트 식별 (다중 서버 운영 시)** — `cycle.host_id` 는 machine-id 기반으로 자동 산출되어 재설치 전까지 불변입니다. 표시용 이름 `cycle.host` 는 기본적으로 시스템 hostname 을 쓰지만, 여러 서버를 한 수신측으로 모으거나 컨테이너에서 hostname 이 불안정할 때는 `agent.yaml` 의 `cycle.host_override` 로 고정할 수 있습니다.
-
-```yaml
-cycle:
-  host_override: "web-prod-01"   # 비우면 시스템 hostname 사용
-```
+핵심만:
+- `transport.endpoint` = push 목적지 URL (`tls_enabled`로 TLS 제어).
+- 토큰 4개(`PUSH/FLUSH/STAT/SOS_INBOUND_TOKEN`)는 각각 임의 시크릿이며 **하나라도 미설정 시 기동 거부**. `PUSH`는 수신 서버와, 나머지는 pull 호출 소비자와 값을 맞춘다.
+- 멀티서버·컨테이너면 `cycle.host_override`로 호스트 표시명 고정.
 
 ---
 
@@ -343,47 +318,6 @@ Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마
 ## 구현 예시 (수신측)
 
 수신측 `/ingest` 핸들러 · 필터링 · 중복제거(멱등) 예시 코드는 [`examples/receiver_example.py`](examples/receiver_example.py) 참조.
-
----
-
-## 에이전트 빌드 및 실행
-
-```bash
-# 빌드
-cargo build --release
-
-# 디렉터리 준비
-mkdir -p /run/log_parser /var/lib/log_parser/spool/new /var/lib/log_parser/spool/retry /etc/log_parser
-
-# 설정·분류·필드 규칙 배치 (기본 경로: /etc/log_parser/)
-cp config/agent.yaml config/categories.yaml config/fields.yaml /etc/log_parser/
-
-# 환경변수 설정 (토큰 4개 — 아래 "환경변수 요약" 참조)
-cp config/.env.example config/.env   # 토큰 값 입력
-
-# 실행
-set -a && source config/.env && set +a
-./target/release/log_parser /etc/log_parser/agent.yaml
-
-# 종료
-kill -TERM <PID>
-```
-
-> **Docker로 실행 시** — `docker compose up -d` 를 쓰면 `docker-compose.yml` 이 `agent.yaml`·`categories.yaml`·`fields.yaml` 을 컨테이너의 `/etc/log_parser/` 로 볼륨 마운트한다(config 변경은 런타임 마운트라 **이미지 재빌드 불필요**, `down && up -d` 재기동만으로 반영). ⚠ **새 설정 파일을 추가하면 compose 볼륨에도 반드시 등록**해야 컨테이너가 읽는다 — 등록 누락 시 해당 파일은 builtin fallback으로 동작한다.
-
----
-
-## 환경변수 요약
-
-| 환경변수                  | 용도                                                        | 필수                   |
-| --------------------- | --------------------------------------------------------- | -------------------- |
-| `PUSH_OUTBOUND_TOKEN` | `/ingest` 수신측 Bearer 토큰                                   | **필수** (미설정 시 기동 거부) |
-| `FLUSH_INBOUND_TOKEN` | `/flush` · `/drain-spool` · `/drain-status` 토큰            | **필수** (미설정 시 기동 거부) |
-| `STAT_INBOUND_TOKEN`  | `/stat` 호출 토큰                                             | **필수** (미설정 시 기동 거부) |
-| `SOS_INBOUND_TOKEN`   | `/trigger-sos` 호출 토큰                                      | **필수** (미설정 시 기동 거부) |
-| `CATEGORIES_PATH`     | categories.yaml 경로 (기본 `/etc/log_parser/categories.yaml`) | 선택                   |
-| `FIELDS_PATH`         | fields.yaml 경로 (기본 `/etc/log_parser/fields.yaml`)         | 선택                   |
-| `RUST_LOG`            | 로그 레벨 (`info` / `debug` / `warn`)                         | 선택                   |
 
 ---
 
