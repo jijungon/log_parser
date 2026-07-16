@@ -17,7 +17,6 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 use tracing::{error, info, warn};
-use xxhash_rust::xxh3::Xxh3;
 
 /// /flush 핸들러 → Coordinator 채널
 pub struct FlushSignal {
@@ -104,56 +103,19 @@ pub async fn run_pipeline(
                 let raw = ev.raw_message().to_string();
                 if raw.is_empty() { continue; }
 
-                // ── 라인마다 필요한 최소 계산: template + severity + fingerprint ──
-                let msg = crate::normalize::tokens::strip_syslog_prefix(&raw);
-                let template = crate::normalize::tokens::normalize(msg);
-                let severity = crate::normalize::severity::finalize(&ev.log_parser_severity, &raw);
+                // Vector가 준 구조화 필드 보강 (메시지에서 추출된 값이 우선, 여긴 빈 자리만)
+                let mut extra: Vec<(&str, String)> = Vec::new();
+                if let Some(pid) = &ev.pid { extra.push(("pid", pid.clone())); }
+                if let Some(unit) = &ev.unit { extra.push(("unit", unit.clone())); }
+                if let Some(priority) = &ev.priority { extra.push(("priority", priority.clone())); }
+                if let Some(fpath) = &ev.file_path { extra.push(("file_path", fpath.clone())); }
+                if !ev.host.is_empty() { extra.push(("source_host", ev.host.clone())); }
 
-                let fp = {
-                    use std::hash::Hasher as _;
-                    let mut h = Xxh3::new();
-                    h.write(template.as_bytes());
-                    h.write(b"|");
-                    h.write(severity.as_bytes());
-                    h.write(b"|");
-                    h.write(ev.log_parser_source.as_bytes());
-                    h.finish()
-                };
-
-                // 윈도우 안의 중복 라인이면 여기서 끝 — fields/category 계산 생략
-                // (기존에는 라인마다 계산 후 병합 시 버려졌음)
-                if dedup.try_merge(fp, &raw, ev.timestamp, severity) {
-                    continue;
-                }
-
-                // ── 첫 등장(또는 창 만료)에만: 필드 추출 + 보강 + 분류 ──
-                let mut fields = crate::normalize::fields::extract_fields(msg);
-                // Enrich with journald/file structured fields from Vector (message-extracted wins)
-                if let Some(pid) = &ev.pid {
-                    fields.entry("pid".to_string())
-                        .or_insert_with(|| serde_json::Value::String(pid.clone()));
-                }
-                if let Some(unit) = &ev.unit {
-                    fields.entry("unit".to_string())
-                        .or_insert_with(|| serde_json::Value::String(unit.clone()));
-                }
-                if let Some(priority) = &ev.priority {
-                    fields.entry("priority".to_string())
-                        .or_insert_with(|| serde_json::Value::String(priority.clone()));
-                }
-                if let Some(fpath) = &ev.file_path {
-                    fields.entry("file_path".to_string())
-                        .or_insert_with(|| serde_json::Value::String(fpath.clone()));
-                }
-                if !ev.host.is_empty() {
-                    fields.entry("source_host".to_string())
-                        .or_insert_with(|| serde_json::Value::String(ev.host.clone()));
-                }
-                let category  = categories.categorize_with_fields(&raw, &fields);
-
-                if let Some(ev) = dedup.push(fp, ev.log_parser_source, severity.to_string(),
-                    category.to_string(), template, raw, ev.timestamp, fields) {
-                    cycle.push(ev);
+                if let Some(emitted) = crate::process::process_line(
+                    &mut dedup, &categories, &raw, &ev.log_parser_source,
+                    &ev.log_parser_severity, ev.timestamp, &extra,
+                ) {
+                    cycle.push(emitted);
                 }
             }
 

@@ -5,6 +5,7 @@ mod envelope;
 mod inbound;
 mod normalize;
 mod pipeline;
+mod process;
 mod platform;
 mod transport;
 
