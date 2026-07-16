@@ -2,6 +2,20 @@
 
 > 최신 항목을 위에 추가한다. (루트 [README](README.md) 요약, 상세 설계는 [docs/](docs/README.md))
 
+## 2026-07-16 — SOS 경로 정합 · 중복 제거
+
+수신측 계약(출력·API)은 **그대로**. SOS(`/trigger-sos`)와 push 경로가 각자 복사해 쓰던
+한 줄 처리(strip→정규화→severity→fingerprint→dedup)를 하나로 합쳐, 같은 로그가 두 경로에서
+**같은 방식으로** 지문을 계산하도록 정합화했다. (단, severity 힌트가 갈리는 경우 — push는
+Vector 1차 분류, SOS는 파일 재파싱이라 `"info"`부터 시작 — 는 SOS가 Vector 분류를 가질 수 없는
+구조상 예외로 남는다.)
+
+| 구분 | 내용 |
+|------|------|
+| SOS 지문 정합 (#13) | SOS 경로 `fingerprint` 공식을 coordinator와 일치 — 같은 (template·severity·source)면 push/SOS 동일 지문 |
+| 공용 파이프라인 (#14) | `src/process.rs` 신설(`fingerprint()`+`process_line()` 단일 정의점). coordinator·collect 인라인 중복 제거 → 지문 발산 원천 차단, SOS도 `try_merge` 최적화(중복 라인 field 추출 생략) 획득. behavior-preserving (175 passed) |
+| 문서 정비 (#12) | docs 파일명 무번호 kebab로 통일 |
+
 ## 2026-07-15 — 핫패스 성능·spool 안정성 개선 + 인수인계 문서 정비
 
 수집·파싱 **방법론은 그대로** 두고(이미 적정), 출력(템플릿·지문) 불변인 성능 개선과 운영 안전성만 손봤다. 그리고 대규모 확장 시의 책임 경계·계약을 문서로 확정했다.
