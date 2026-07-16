@@ -951,7 +951,6 @@ pub async fn collect_logs(log_paths: &[String]) -> Value {
     tokio::task::spawn_blocking(move || {
         use crate::dedup::window::DedupWindow;
         use crate::normalize::categories::CategoryMatcher;
-        use crate::normalize::{fields, severity, tokens};
         use chrono::Datelike;
         use std::io::BufRead;
 
@@ -1023,29 +1022,10 @@ pub async fn collect_logs(log_paths: &[String]) -> Value {
                 let ts = parse_syslog_ts(&line, year).or_else(|| parse_iso_ts(&line));
                 if let Some(ts) = ts {
                     if ts < cutoff { continue; }
-                    let stripped = tokens::strip_syslog_prefix(&line);
-                    let template = tokens::normalize(stripped);
-                    let fields_map = fields::extract_fields(stripped);
-                    let sev = severity::finalize("info", stripped);
-
-                    // fingerprint 공식은 coordinator(push 경로, coordinator/mod.rs)와 동일해야
-                    // 같은 로그가 두 경로에서 같은 지문을 갖는다: xxh3(template | severity | source)
-                    let fingerprint = {
-                        use std::hash::Hasher as _;
-                        let mut h = xxhash_rust::xxh3::Xxh3::new();
-                        h.write(template.as_bytes());
-                        h.write(b"|");
-                        h.write(sev.as_bytes());
-                        h.write(b"|");
-                        h.write(source.as_bytes());
-                        h.finish()
-                    };
-
-                    let category = categories.categorize_with_fields(&line, &fields_map).to_string();
-
-                    if let Some(emitted) = window.push(
-                        fingerprint, source.clone(), sev.to_string(),
-                        category, template, line, ts, fields_map,
+                    // 공용 경로 재사용 — coordinator(push)와 동일한 정규화·fingerprint·dedup.
+                    // sos는 Vector severity 힌트가 없어 초기값 "info", 구조화 보강 필드 없음.
+                    if let Some(emitted) = crate::process::process_line(
+                        &mut window, &categories, &line, &source, "info", ts, &[],
                     ) {
                         all_events.push(emitted);
                         if all_events.len() >= max_events { break 'outer; }
