@@ -1,21 +1,13 @@
-mod config;
-mod coordinator;
-mod dedup;
-mod envelope;
-mod inbound;
-mod normalize;
-mod pipeline;
-mod process;
-mod platform;
-mod transport;
+use log_parser::{
+    config, coordinator, envelope, inbound, normalize, pipeline, platform, transport,
+};
+use log_parser::{DEFAULT_CATEGORIES, DEFAULT_FIELDS};
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tracing::info;
 
 const DEFAULT_CONFIG: &str = "/etc/log_parser/agent.yaml";
-pub const DEFAULT_CATEGORIES: &str = "/etc/log_parser/categories.yaml";
-pub const DEFAULT_FIELDS: &str = "/etc/log_parser/fields.yaml";
 const RUNTIME_VECTOR_CONFIG: &str = "/run/log_parser/vector.toml";
 
 #[tokio::main]
