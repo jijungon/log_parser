@@ -2,6 +2,24 @@
 
 > 최신 항목을 위에 추가한다. (루트 [README](README.md) 요약, 상세 설계는 [docs/](docs/README.md))
 
+## 2026-07-21 — 부하 테스트 도구 + 라이브러리 분리
+
+프로덕션 파서와 **별개**로 파싱·전송 속도와 메모리 거동을 측정하는 도구를 추가했다.
+파서 동작은 불변(모듈을 lib로 노출만).
+
+| 구분 | 내용 |
+|------|------|
+| 라이브러리 분리 (#16) | 바이너리 전용 크레이트 → `src/lib.rs`로 모듈 `pub` 노출(lib+bin). `main.rs`는 `use log_parser::…`로 전환. 동작·테스트 불변(175 passed) |
+| 부하 도구 (#16) | `src/bin/loadtest.rs` — 파일/Vector 없이 메모리 스트리밍 생성 → 실제 `process_line`→dedup→`CycleState` envelope→실제 transport(gzip+POST). 옵션 `--gb/--endpoint/--window-seconds/--lru-cap/--distinct`. 번들 수신기 `examples/loadtest_receiver.py`(표준 라이브러리) |
+| 카디널리티 계측 (#17) | `--distinct`(고유 템플릿 dial) + `DedupWindow::total_evictions()` getter. 리포트에 만료방출/창보유/**LRU폐기** 분리 표시 |
+| 기본값 정렬 (#18) | loadtest 기본 `lru_cap` 200,000 → **50,000**(프로덕션 `agent.yaml`과 동일). 이전 200k는 테스트 아티팩트 |
+
+**실측 결과 (VM, cgroup off = 미제한 처리량):**
+
+- **저카디널리티 100GB**: 파싱 **44.7 MB/s**(53만 lines/s) · peak RSS **39MB** · dedup 후 gzip **1.3MB**/사이클
+- **고카디널리티(프로덕션 lru_cap 50k)**: 창이 50,000에서 하드바운드 · peak RSS **53.5MB**(128MB cage 이내) · 처리량 21.8 MB/s
+- **결론**: 프로덕션 설정에서 대용량·고카디널리티 모두 **파싱·전송·메모리 안전 → 프로덕션 config 변경 불필요.** (극단 카디널리티 시 LRU폐기 관측성 노출은 중앙 모니터링 구현 시로 보류)
+
 ## 2026-07-16 — SOS 경로 정합 · 중복 제거
 
 수신측 계약(출력·API)은 **그대로**. SOS(`/trigger-sos`)와 push 경로가 각자 복사해 쓰던
