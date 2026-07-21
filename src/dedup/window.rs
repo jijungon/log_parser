@@ -113,6 +113,12 @@ impl DedupWindow {
         None
     }
 
+    /// 지금까지 발생한 LRU 방출 총수 = lru_cap 초과로 **폐기된** 고유 패턴 수.
+    /// 평상시 0(창 회전으로 cap 도달 전에 flush됨). >0이면 카디널리티가 cap을 압박한다는 신호.
+    pub fn total_evictions(&self) -> u64 {
+        self.total_evictions
+    }
+
     /// 윈도우가 만료된 항목을 모두 방출
     pub fn flush_expired(&mut self) -> Vec<DedupEvent> {
         let now = Utc::now();

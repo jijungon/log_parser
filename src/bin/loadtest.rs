@@ -10,8 +10,13 @@
 //!   loadtest --gb 100 [--endpoint http://host:8080/ingest] [--window-seconds 86400]
 //!            [--lru-cap 200000] [--categories /etc/log_parser/categories.yaml]
 //!
-//! 주의: cgroup 자가 격리는 프로덕션 바이너리 몫이라 여기선 적용되지 않는다(=미제한 처리량).
+//! 주의1: cgroup 자가 격리는 프로덕션 바이너리 몫이라 여기선 적용되지 않는다(=미제한 처리량).
 //! 5% CPU cap이 켜진 실환경 벽시계는 대략 이 수치의 ×20으로 외삽한다.
+//!
+//! 주의2: 모든 라인이 같은 타임스탬프라 dedup 창이 '시간으로' 비워지지 않는다(worst case).
+//! 따라서 고유 패턴이 lru_cap을 넘으면 LRU폐기로 나타나는데, 이는 **메모리 상한을 지키려는
+//! 백프레셔**(OOM 대신 오래된 패턴 폐기)를 증명한다. 실운영은 창이 30초마다 회전하므로,
+//! '30초 안에' 고유 패턴이 lru_cap을 넘는 극단적 경우에만 폐기가 발생한다.
 
 use anyhow::Result;
 use log_parser::config::TransportConfig;
@@ -50,13 +55,28 @@ const SVCS: &[&str] = &[
     "auditlog", "cdn", "dns", "loadbal", "proxy", "storage", "telemetry", "vpn",
 ];
 
-/// 라인 n번째를 syslog(RFC3164 유사) 한 줄로 생성. 길이 ~120–160B.
-fn gen_line(n: u64, buf: &mut String) {
+/// 서비스 워드를 buf에 직접 기록(할당 없음). 낮은 k는 읽기 좋은 SVCS,
+/// 높은 k는 base-26 letters로 — 정규화가 안 지우는 단어라 '고유 템플릿'을 만든다.
+fn write_tag(mut k: u64, buf: &mut String) {
+    if (k as usize) < SVCS.len() {
+        buf.push_str(SVCS[k as usize]);
+        return;
+    }
+    k += 1;
+    while k > 0 {
+        buf.push((b'a' + (k % 26) as u8) as char);
+        k /= 26;
+    }
+}
+
+/// 라인 n번째를 syslog(RFC3164 유사) 한 줄로 생성. `distinct`는 svc 워드 풀 크기
+/// (고유 정규화 템플릿 ≈ distinct × {svc} 포함 BODY 수). 길이 ~120–160B.
+fn gen_line(n: u64, distinct: u64, buf: &mut String) {
     buf.clear();
     // 고정 헤더 — strip_syslog_prefix가 제거하는 부분
     buf.push_str("Jul 16 10:23:45 grafana ");
     let body = BODIES[(n as usize) % BODIES.len()];
-    let svc = SVCS[((n / BODIES.len() as u64) as usize) % SVCS.len()];
+    let k = (n / BODIES.len() as u64) % distinct.max(1);
     let ip = format!("10.{}.{}.{}", (n >> 16) & 255, (n >> 8) & 255, n & 255);
     let pid = (n % 65535) + 1;
     let num = n % 100_000;
@@ -70,7 +90,7 @@ fn gen_line(n: u64, buf: &mut String) {
                 "{pid}" => buf.push_str(&pid.to_string()),
                 "{num}" => buf.push_str(&num.to_string()),
                 "{port}" => buf.push_str(&port.to_string()),
-                "{svc}" => buf.push_str(svc),
+                "{svc}" => write_tag(k, buf),
                 other => buf.push_str(other), // unknown → 그대로
             }
         } else {
@@ -112,6 +132,8 @@ async fn main() -> Result<()> {
     let endpoint = arg("--endpoint").unwrap_or_default();
     let window_seconds: u64 = arg("--window-seconds").and_then(|s| s.parse().ok()).unwrap_or(86_400);
     let lru_cap: usize = arg("--lru-cap").and_then(|s| s.parse().ok()).unwrap_or(200_000);
+    // svc 워드 풀 크기 = 카디널리티 dial. 기본은 읽기 좋은 SVCS 풀 크기. 크게 주면 고유 템플릿↑.
+    let distinct: u64 = arg("--distinct").and_then(|s| s.parse().ok()).unwrap_or(SVCS.len() as u64);
     let categories_path = arg("--categories").unwrap_or_default();
 
     // 필드 추출 전역 초기화 (미초기화 시 extract_fields가 동작 안 함)
@@ -128,13 +150,15 @@ async fn main() -> Result<()> {
     let target_bytes = (gb * (1u64 << 30) as f64) as u64;
     eprintln!(
         "[loadtest] 목표 {gb} GB 생성·파싱 (window={window_seconds}s, lru_cap={lru_cap}, \
-         source=file.syslog, endpoint={})",
+         distinct(svc풀)={distinct}, source=file.syslog, endpoint={})",
         if endpoint.is_empty() { "(전송 생략)" } else { &endpoint }
     );
 
     let base_ts = chrono::Utc::now();
     let mut window = DedupWindow::new(window_seconds, lru_cap);
-    let mut carried: Vec<log_parser::envelope::DedupEvent> = Vec::new(); // LRU 방출분
+    // 시간 만료로 방출된 이벤트 '수'만 센다(누적 저장 X — 고카디널리티에서 도구 메모리 폭발 방지).
+    // LRU 폐기분은 window.total_evictions()로 따로 읽는다.
+    let mut emitted_expired: u64 = 0;
 
     let mut in_lines: u64 = 0;
     let mut in_bytes: u64 = 0;
@@ -143,13 +167,13 @@ async fn main() -> Result<()> {
 
     let t0 = Instant::now();
     while in_bytes < target_bytes {
-        gen_line(in_lines, &mut line);
+        gen_line(in_lines, distinct, &mut line);
         in_bytes += line.len() as u64 + 1;
         in_lines += 1;
-        if let Some(ev) =
-            process::process_line(&mut window, &categories, &line, "file.syslog", "info", base_ts, &[])
+        if process::process_line(&mut window, &categories, &line, "file.syslog", "info", base_ts, &[])
+            .is_some()
         {
-            carried.push(ev);
+            emitted_expired += 1;
         }
         if in_bytes >= next_mark {
             let secs = t0.elapsed().as_secs_f64();
@@ -163,13 +187,14 @@ async fn main() -> Result<()> {
         }
     }
     let parse_elapsed = t0.elapsed();
+    let lru_drops = window.total_evictions(); // lru_cap 초과로 폐기된 고유 패턴 수
     let flushed = window.flush_all();
-    let out_events = carried.len() as u64 + flushed.len() as u64;
+    let cycle_events = flushed.len() as u64; // 현재 창 보유 = 1사이클 envelope(≤ lru_cap)
     let rss = peak_rss_kb();
 
-    // ── envelope 조립 (실제 CycleState) ──
+    // ── envelope 조립: 한 사이클 분량(flush_all)만 = 실제 송출 단위(≤ lru_cap) ──
     let mut cyc = CycleState::new(1, "loadtest".into(), "hid".into(), "bid".into(), usize::MAX);
-    for ev in carried.into_iter().chain(flushed) {
+    for ev in flushed {
         cyc.push(ev);
     }
     let (envelope, _next_seq) = cyc.finalize(0, parse_elapsed.as_secs());
@@ -202,7 +227,8 @@ async fn main() -> Result<()> {
 
     // ── 리포트 ──
     let secs = parse_elapsed.as_secs_f64();
-    let ratio = if out_events > 0 { in_lines as f64 / out_events as f64 } else { 0.0 };
+    let distinct_total = emitted_expired + cycle_events + lru_drops;
+    let ratio = if distinct_total > 0 { in_lines as f64 / distinct_total as f64 } else { 0.0 };
     println!("\n===== loadtest 결과 =====");
     println!(
         "입력  : {} · {} lines (avg {}B/line)",
@@ -220,7 +246,17 @@ async fn main() -> Result<()> {
             None => " · peak RSS n/a(비-Linux)".into(),
         }
     );
-    println!("dedup : {} lines → {} events ({:.0}:1 압축)", in_lines, out_events, ratio);
+    println!(
+        "dedup : {} lines → ~{} 고유 (만료방출 {} + 창보유 {} + LRU폐기 {}) · {:.0}:1",
+        in_lines, distinct_total, emitted_expired, cycle_events, lru_drops, ratio
+    );
+    if lru_drops > 0 {
+        println!(
+            "  ⚠ LRU폐기 {} — 카디널리티가 lru_cap({})/window({}s) 상한 초과 → 오래된 고유패턴 폐기(메모리 상한 유지). \
+             실운영 30s 창에선 '30초당' 고유패턴이 lru_cap 넘을 때만 발생.",
+            lru_drops, lru_cap, window_seconds
+        );
+    }
     println!(
         "전송  : envelope {} → gzip {} ({:.1}:1) · gzip {:.0}ms{}",
         human_bytes(json.len() as u64),
