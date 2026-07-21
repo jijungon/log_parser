@@ -7,8 +7,9 @@
 //! 측정: 파싱 처리량(lines/s·MB/s), dedup 압축비, peak RSS, 전송 바이트(gzip 후)·지연.
 //!
 //! 사용:
-//!   loadtest --gb 100 [--endpoint http://host:8080/ingest] [--window-seconds 86400]
-//!            [--lru-cap 200000] [--categories /etc/log_parser/categories.yaml]
+//!   loadtest --gb 100 [--endpoint http://host:8099/ingest] [--window-seconds 86400]
+//!            [--lru-cap 50000] [--distinct 64] [--categories /etc/log_parser/categories.yaml]
+//!   (lru-cap 기본 50000 = 프로덕션 agent.yaml과 동일)
 //!
 //! 주의1: cgroup 자가 격리는 프로덕션 바이너리 몫이라 여기선 적용되지 않는다(=미제한 처리량).
 //! 5% CPU cap이 켜진 실환경 벽시계는 대략 이 수치의 ×20으로 외삽한다.
@@ -131,7 +132,8 @@ async fn main() -> Result<()> {
     let gb: f64 = arg("--gb").and_then(|s| s.parse().ok()).unwrap_or(10.0);
     let endpoint = arg("--endpoint").unwrap_or_default();
     let window_seconds: u64 = arg("--window-seconds").and_then(|s| s.parse().ok()).unwrap_or(86_400);
-    let lru_cap: usize = arg("--lru-cap").and_then(|s| s.parse().ok()).unwrap_or(200_000);
+    // 기본값은 프로덕션 agent.yaml(dedup.lru_cap=50000)과 정렬 — 테스트가 실제 거동을 반영하도록.
+    let lru_cap: usize = arg("--lru-cap").and_then(|s| s.parse().ok()).unwrap_or(50_000);
     // svc 워드 풀 크기 = 카디널리티 dial. 기본은 읽기 좋은 SVCS 풀 크기. 크게 주면 고유 템플릿↑.
     let distinct: u64 = arg("--distinct").and_then(|s| s.parse().ok()).unwrap_or(SVCS.len() as u64);
     let categories_path = arg("--categories").unwrap_or_default();
