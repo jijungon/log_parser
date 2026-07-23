@@ -11,8 +11,10 @@
 //!
 //! 사용: `GET /raw?since=1h&sources=syslog,auth,kernel,journald&max_mb=10`
 //!
-//! 주의: 도커로 뜬 파서는 호스트 journald가 컨테이너에 마운트돼 있어야 journald 소스가 동작한다
-//! (미마운트면 journalctl 실패 → 해당 소스만 조용히 생략, 파일 소스는 정상).
+//! 주의: 도커 파서는 호스트 저널이 컨테이너에 마운트돼 있어야 journald 소스가 동작한다
+//! (docker-compose.yml에 `/var/log/journal`·`/run/log/journal` 마운트 존재). journalctl은
+//! `--merge`로 machine-id에 무관하게 마운트된 저널을 읽는다 — 컨테이너 machine-id는 호스트와
+//! 달라서 --merge가 없으면 "-- No entries --"가 된다. 저널 부재(rsyslog-only)면 조용히 생략.
 
 use super::{check_auth, collect, InboundState};
 use axum::{
@@ -223,8 +225,11 @@ async fn read_journald(cutoff: DateTime<Utc>, max_bytes: usize) -> Option<(Strin
     let since = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
     // journalctl 자체 메모리 폭주 방지용 라인 상한(바이트 예산에서 대략 유도).
     let nlines = (max_bytes / 80).clamp(1000, 300_000).to_string();
+    // --merge: machine-id 상관없이 마운트된 모든 저널을 읽는다. 도커 파서는 컨테이너 machine-id가
+    // 호스트와 달라, 이게 없으면 마운트된 호스트 저널(/var/log/journal/<host-id>)을 못 찾고
+    // "-- No entries --"가 된다. bare-metal에선 로컬 저널만 있어 동작 동일.
     let out = Command::new("journalctl")
-        .args(["--since", &since, "--no-pager", "-o", "short-iso", "-n", &nlines])
+        .args(["--since", &since, "--merge", "--no-pager", "-o", "short-iso", "-n", &nlines])
         .output()
         .await
         .ok()?;

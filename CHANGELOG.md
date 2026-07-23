@@ -14,6 +14,7 @@ on-demand로 당기는 `GET /raw`를 추가했다.
 - `collect.rs`의 syslog/ISO 타임스탬프 파서를 `pub(crate)` 모듈 함수로 승격해 `/raw`와 공유(동작 불변).
 - 검증: `cargo test` **181 passed**(신규 raw 6건, 파일 읽기 통합 테스트 포함).
 - 배포: 각 서버 `docker compose build && up -d` 재배포 후 호출 가능. 도커 파서는 `journald` 소스에 호스트 저널 마운트 필요(미마운트 시 파일 소스만 동작).
+- 후속: journald는 `journalctl --merge`로 조회 — 컨테이너 machine-id가 호스트와 달라, --merge 없이는 마운트된 호스트 저널을 못 읽고 "-- No entries --"가 되던 것을 수정.
 
 ## 2026-07-21 — 부하 테스트 도구 + 라이브러리 분리
 
