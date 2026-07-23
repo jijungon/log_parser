@@ -946,6 +946,41 @@ async fn collect_pci() -> Value {
 // Logs (SOS only)
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// syslog(RFC3164) 타임스탬프 파서 — "Mon DD HH:MM:SS …". 연도가 로그에 없어 외부 주입.
+/// collect_logs(sos)와 raw 엔드포인트가 공유한다.
+pub(crate) fn parse_syslog_ts(line: &str, year: i32) -> Option<DateTime<Utc>> {
+    use chrono::{NaiveDateTime, TimeZone};
+    let mut it = line.split_whitespace();
+    let month = it.next()?;
+    let day = it.next()?;
+    let time = it.next()?;
+    let dt_str = format!("{} {} {} {}", year, month, day, time);
+    let mut dt = NaiveDateTime::parse_from_str(&dt_str, "%Y %b %d %H:%M:%S")
+        .ok()
+        .and_then(|ndt| Utc.from_local_datetime(&ndt).single())?;
+    // Year-boundary fix: if parsed date is more than a day in the future, retry with year-1
+    if dt > Utc::now() + Duration::days(1) {
+        let dt_str2 = format!("{} {} {} {}", year - 1, month, day, time);
+        if let Some(prev) = NaiveDateTime::parse_from_str(&dt_str2, "%Y %b %d %H:%M:%S")
+            .ok()
+            .and_then(|ndt| Utc.from_local_datetime(&ndt).single())
+        {
+            dt = prev;
+        }
+    }
+    Some(dt)
+}
+
+/// ISO-8601 / RFC-3339 타임스탬프 파서 (rsyslog, journald text export).
+/// e.g. "2024-05-08T04:41:04+00:00 hostname proc: message"
+pub(crate) fn parse_iso_ts(line: &str) -> Option<DateTime<Utc>> {
+    use chrono::DateTime as ChronoDateTime;
+    let token = line.split_whitespace().next()?;
+    ChronoDateTime::parse_from_rfc3339(token)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
 pub async fn collect_logs(log_paths: &[String]) -> Value {
     let log_paths = log_paths.to_vec();
     tokio::task::spawn_blocking(move || {
@@ -964,39 +999,6 @@ pub async fn collect_logs(log_paths: &[String]) -> Value {
         let cutoff: DateTime<Utc> = Utc::now() - Duration::hours(4);
         let max_events = 500usize;
         let year = Utc::now().year();
-
-        fn parse_syslog_ts(line: &str, year: i32) -> Option<DateTime<Utc>> {
-            use chrono::{NaiveDateTime, TimeZone};
-            let mut it = line.split_whitespace();
-            let month = it.next()?;
-            let day = it.next()?;
-            let time = it.next()?;
-            let dt_str = format!("{} {} {} {}", year, month, day, time);
-            let mut dt = NaiveDateTime::parse_from_str(&dt_str, "%Y %b %d %H:%M:%S")
-                .ok()
-                .and_then(|ndt| Utc.from_local_datetime(&ndt).single())?;
-            // Year-boundary fix: if parsed date is more than a day in the future, retry with year-1
-            if dt > Utc::now() + Duration::days(1) {
-                let dt_str2 = format!("{} {} {} {}", year - 1, month, day, time);
-                if let Some(prev) = NaiveDateTime::parse_from_str(&dt_str2, "%Y %b %d %H:%M:%S")
-                    .ok()
-                    .and_then(|ndt| Utc.from_local_datetime(&ndt).single())
-                {
-                    dt = prev;
-                }
-            }
-            Some(dt)
-        }
-
-        // Secondary parser for ISO-8601 / RFC-3339 format (rsyslog, journald text export)
-        // e.g. "2024-05-08T04:41:04+00:00 hostname proc: message"
-        fn parse_iso_ts(line: &str) -> Option<DateTime<Utc>> {
-            use chrono::DateTime as ChronoDateTime;
-            let token = line.split_whitespace().next()?;
-            ChronoDateTime::parse_from_rfc3339(token)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc))
-        }
 
         let mut window = DedupWindow::new(14400u64, 50000);
         let mut all_events: Vec<crate::envelope::DedupEvent> = Vec::new();

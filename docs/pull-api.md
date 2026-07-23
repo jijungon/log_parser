@@ -34,6 +34,27 @@ curl -s -X POST http://agent-host:9100/trigger-sos \
 
 응답: `sos_snapshot` envelope (최근 4시간 로그 포함, 타임아웃 120초 이상 권장)
 
+## GET /raw — 원문 로그 드릴다운
+
+요약(`/trigger-sos`)으로 개요를 본 뒤 **상세 대처가 필요할 때** dedup 안 된 원문 라인을 당긴다.
+인증은 **SOS 토큰 재사용**(별도 토큰 없음), rate-limit은 `/trigger-sos`와 공유.
+
+```bash
+curl -s "http://agent-host:9100/raw?since=1h&sources=syslog,auth,kernel,journald&max_mb=10" \
+  -H "Authorization: Bearer ${SOS_INBOUND_TOKEN}" \
+  --compressed
+```
+
+| 파라미터 | 기본 | 상한 | 의미 |
+|---------|------|------|------|
+| `since` | `1h` | `24h` | 되돌아볼 시간창 (`30s`/`15m`/`2h`/`1d`) |
+| `sources` | 전체 | — | `syslog`·`auth`·`kernel`(파일) + `journald`(`journalctl`). 콤마 구분 |
+| `max_mb` | `10` | `30` | 응답 크기 상한. 초과 시 라인 경계에서 자름 |
+
+- 응답: **gzip `text/plain`** 원문 라인. 헤더 `X-Raw-Bytes`·`X-Raw-Lines`·`X-Raw-Truncated`·`X-Raw-Window`.
+- **전량이 아니다** — 파서 메모리(cgroup 128MB) 보호를 위해 시간창·크기로 bounded. 전체가 필요하면 소스 서버에서 직접(`journalctl`/`/var/log`).
+- 도커 파서는 호스트 journald가 컨테이너에 마운트돼야 `journald` 소스가 동작(미마운트면 해당 소스만 조용히 생략, 파일 소스는 정상).
+
 ## POST /flush — 현재 cycle 즉시 방출 (디버그용)
 
 > **주의**: `/flush`는 현재 cycle의 envelope을 HTTP **응답 바디**로 직접 반환합니다.
@@ -96,7 +117,7 @@ curl -s http://agent-host:9100/drain-status \
 
 ## 에러 응답 코드 (에이전트 → 수신측 pull 응답)
 
-수신측이 pull API(`/stat`·`/flush`·`/trigger-sos`·`/drain-spool`)를 호출했을 때 **에이전트가 돌려주는** 코드. (반대 방향인 push 응답 코드는 루트 README "수신 엔드포인트 구현 요건" 참조)
+수신측이 pull API(`/stat`·`/flush`·`/trigger-sos`·`/raw`·`/drain-spool`)를 호출했을 때 **에이전트가 돌려주는** 코드. (반대 방향인 push 응답 코드는 루트 README "수신 엔드포인트 구현 요건" 참조)
 
 | 코드    | 의미                                                                                                      |
 | ----- | ------------------------------------------------------------------------------------------------------- |
@@ -106,5 +127,5 @@ curl -s http://agent-host:9100/drain-status \
 | `401` | 토큰 인증 실패                                                                                                |
 | `409` | 이미 처리 중 (flush 또는 drain 중복 호출)                                                                          |
 | `413` | envelope 크기 초과 (`envelope_size_limit_mb` 설정, JSON 직렬화 기준)                                               |
-| `429` | **에이전트 측 Rate limit** (`/flush`: 기본 6회/시간, `/stat`·`/trigger-sos`: 기본 60회/시간, `rate_limit_per_hour` 설정) |
+| `429` | **에이전트 측 Rate limit** (`/flush`: 기본 6회/시간, `/stat`·`/trigger-sos`·`/raw`: 기본 60회/시간, `rate_limit_per_hour` 설정) |
 | `503` | `/flush` — wait 모드 타임아웃 또는 coordinator 채널 종료 시                                                          |

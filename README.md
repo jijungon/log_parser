@@ -265,7 +265,8 @@ Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마
 | 엔드포인트 | 용도 | 토큰 | 응답 |
 |---|---|---|---|
 | `GET /stat` | 현재 시스템 상태 | STAT | `stat_snapshot` |
-| `POST /trigger-sos` | SOS 진단(최근 4h 로그) | SOS | `sos_snapshot` (타임아웃 120s+) |
+| `POST /trigger-sos` | SOS 진단(최근 4h 로그, dedup 요약) | SOS | `sos_snapshot` (타임아웃 120s+) |
+| `GET /raw?since&sources&max_mb` | 원문 로그 드릴다운(dedup 안 함, bounded) | SOS | gzip text (기본 1h/10MB, 상한 24h/30MB) |
 | `POST /flush` | 현재 cycle 즉시 방출(디버그) | FLUSH | envelope (응답 바디, `/ingest` 아님) |
 | `POST /drain-spool?from&to` | `retry/` 재전송 | FLUSH | `202` (백그라운드) |
 | `GET /drain-status` | drain 진행 조회 | FLUSH | idle/in_progress/completed |

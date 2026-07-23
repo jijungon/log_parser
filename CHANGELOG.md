@@ -2,6 +2,19 @@
 
 > 최신 항목을 위에 추가한다. (루트 [README](README.md) 요약, 상세 설계는 [docs/](docs/README.md))
 
+## 2026-07-23 — `/raw` 원문 로그 드릴다운 엔드포인트
+
+요약(`/flush`·`/trigger-sos`, dedup)만으로 부족한 상세 대처를 위해, 최근 원문 로그를
+on-demand로 당기는 `GET /raw`를 추가했다.
+
+- **`GET /raw?since=1h&sources=syslog,auth,kernel,journald&max_mb=10`** — dedup 안 된 원문 라인 반환.
+  파일(syslog/auth/kernel) + journald(`journalctl --since`). gzip `text/plain` + `X-Raw-Bytes`·`X-Raw-Lines`·`X-Raw-Truncated`·`X-Raw-Window` 헤더.
+- **bounded**: `since` 기본 1h/최대 24h, `max_mb` 기본 10/하드캡 30 — 파서 cgroup(128MB) 보호. "전량"은 불가(전체는 소스 서버 직접).
+- 인증 **SOS 토큰 재사용**(새 필수 토큰 없음), rate-limit은 `/trigger-sos`와 공유(`collection_rate`).
+- `collect.rs`의 syslog/ISO 타임스탬프 파서를 `pub(crate)` 모듈 함수로 승격해 `/raw`와 공유(동작 불변).
+- 검증: `cargo test` **181 passed**(신규 raw 6건, 파일 읽기 통합 테스트 포함).
+- 배포: 각 서버 `docker compose build && up -d` 재배포 후 호출 가능. 도커 파서는 `journald` 소스에 호스트 저널 마운트 필요(미마운트 시 파일 소스만 동작).
+
 ## 2026-07-21 — 부하 테스트 도구 + 라이브러리 분리
 
 프로덕션 파서와 **별개**로 파싱·전송 속도와 메모리 거동을 측정하는 도구를 추가했다.
