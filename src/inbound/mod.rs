@@ -1,6 +1,7 @@
 pub mod collect;
 pub mod drain;
 pub mod flush;
+pub mod raw;
 pub mod sos;
 pub mod stat;
 
@@ -186,6 +187,7 @@ pub async fn serve(
         .route("/flush", post(flush::handle_flush))
         .route("/stat", get(stat::handle_stat))
         .route("/trigger-sos", post(sos::handle_sos))
+        .route("/raw", get(raw::handle_raw))
         .route("/drain-spool", post(drain::handle_drain_spool))
         .route("/drain-status", get(drain::handle_drain_status))
         .with_state(state)
