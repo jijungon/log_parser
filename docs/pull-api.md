@@ -40,18 +40,21 @@ curl -s -X POST http://agent-host:9100/trigger-sos \
 인증은 **SOS 토큰 재사용**(별도 토큰 없음), rate-limit은 `/trigger-sos`와 공유.
 
 ```bash
-curl -s "http://agent-host:9100/raw?since=1h&sources=syslog,auth,kernel,journald&max_mb=10" \
+# 특정 사건 창만 좁혀 받기 (예: 2시간 전 ~ 1시간 전)
+curl -s "http://agent-host:9100/raw?since=2h&until=1h&sources=syslog,auth,kernel,journald&max_mb=10" \
   -H "Authorization: Bearer ${SOS_INBOUND_TOKEN}" \
   --compressed
 ```
 
 | 파라미터 | 기본 | 상한 | 의미 |
 |---------|------|------|------|
-| `since` | `1h` | `24h` | 되돌아볼 시간창 (`30s`/`15m`/`2h`/`1d`) |
+| `since` | `1h` | `24h` | 되돌아볼 시간창 시작(`30s`/`15m`/`2h`/`1d`) |
+| `until` | (없음=now) | — | 창의 **최근쪽 상한**(now 기준 되돌린 값). `since`보다 더 최근이어야 유효. 특정 창만 좁힐 때 |
 | `sources` | 전체 | — | `syslog`·`auth`·`kernel`(파일) + `journald`(`journalctl`). 콤마 구분 |
 | `max_mb` | `10` | `30` | 응답 크기 상한. 초과 시 라인 경계에서 자름 |
 
 - 응답: **gzip `text/plain`** 원문 라인. 헤더 `X-Raw-Bytes`·`X-Raw-Lines`·`X-Raw-Truncated`·`X-Raw-Window`.
+- **로그로테이션 포함** — 파일 소스는 현재 파일뿐 아니라 `.1`·`.2.gz` 등 회전본도 오래된 것부터 이어 읽어(창 안이면), 하루 안에 회전된 로그도 잡는다.
 - **전량이 아니다** — 파서 메모리(cgroup 128MB) 보호를 위해 시간창·크기로 bounded. 전체가 필요하면 소스 서버에서 직접(`journalctl`/`/var/log`).
 - 도커 파서는 호스트 journald가 컨테이너에 마운트돼야 `journald` 소스가 동작(미마운트면 해당 소스만 조용히 생략, 파일 소스는 정상).
 
