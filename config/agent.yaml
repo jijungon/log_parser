@@ -47,8 +47,10 @@ transport:
   retry_max_normal: 5               # critical은 무한 재시도 (원칙 #1)
   retry_base_seconds: 5
   retry_max_seconds: 300
-  spool_max_mb: 512
+  spool_max_mb: 2048                # new/ WAL 용량 상한 (초과 시 oldest → retry/ evict)
   spool_dir: "/var/lib/log_parser/spool"
+  retry_max_mb: 1024                # retry/ 데드레터 용량 상한 (0 = 무제한)
+  retry_ttl_hours: 168              # retry/ 보관 기간 7일 (0 = 무기한)
   # http_json 전용 (kind="http_json" 시에만 사용)
   http_gzip_level: 6
 
