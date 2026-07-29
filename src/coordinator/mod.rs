@@ -75,6 +75,11 @@ pub async fn run_pipeline(
         });
     }
 
+    // 라이브 전송 동시성 상한 — startup replay(4)와 동일. 수신 서버 장기 장애 시
+    // 매 30분 cycle마다 새 전송 태스크가 무제한 누적돼 압축 body가 메모리에
+    // 쌓이는 것(128MB cgroup 내 OOM)을 방지한다.
+    let live_send_sem = Arc::new(tokio::sync::Semaphore::new(4));
+
     let mut dedup = DedupWindow::new(dedup_cfg.window_seconds, dedup_cfg.lru_cap);
     let mut cycle = cycle::CycleState::new(
         initial_seq,
@@ -218,9 +223,15 @@ pub async fn run_pipeline(
                         persist_seq(&seq_state_path, next_seq).await;
                         let t2  = Arc::clone(&t);
                         let sp2 = Arc::clone(&spool);
+                        let sem = Arc::clone(&live_send_sem);
                         let retry_base = transport_cfg.retry_base_seconds;
                         let retry_max  = transport_cfg.retry_max_seconds;
                         tokio::spawn(async move {
+                            // 동시 전송 4개 상한 — 대기 중엔 압축 body를 만들지 않는다
+                            let _permit = match sem.acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => return, // semaphore closed — 발생 안 함
+                            };
                             send_with_backoff(t2, envelope, path, max, has_critical, sp2, retry_base, retry_max).await;
                         });
                     }
@@ -230,9 +241,14 @@ pub async fn run_pipeline(
                         warn!("spool 저장 실패 ({e}) — 백오프 재시도 진행");
                         let t2  = Arc::clone(&t);
                         let sp2 = Arc::clone(&spool);
+                        let sem = Arc::clone(&live_send_sem);
                         let retry_base = transport_cfg.retry_base_seconds;
                         let retry_max  = transport_cfg.retry_max_seconds;
                         tokio::spawn(async move {
+                            let _permit = match sem.acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => return,
+                            };
                             send_with_backoff(t2, envelope, PathBuf::new(), max, has_critical, sp2, retry_base, retry_max).await;
                         });
                     }
@@ -295,8 +311,11 @@ fn envelope_has_critical(env: &Envelope) -> bool {
 }
 
 /// 지수 백오프 재전송. 성공 시 spool 삭제.
-/// critical envelope은 성공 또는 Fatal까지 무한 재시도 (원칙 #1).
 /// non-critical은 최초 전송 포함 max_retries+1번 전송 후 포기 (spool 보존).
+/// critical은 2×max_retries까지 in-memory 재시도 후 retry/로 파킹 —
+/// envelope은 이미 WAL로 디스크에 있으므로, 무한 재시도로 태스크·압축 body가
+/// 수 시간 누적돼 128MB cgroup 안에서 OOM되는 것보다 파킹 후
+/// 기동 replay / POST /drain-spool 배달이 안전하다 (원칙 #1은 디스크 보존으로 유지).
 /// (max_retries=N → 1회 초기 전송 + N회 재시도 = 최대 N+1회)
 async fn send_with_backoff(
     t: Arc<HttpJsonTransport>,
@@ -334,6 +353,13 @@ async fn send_with_backoff(
     // 정상 경로에선 디스크에 이미 있으므로 메모리 절약을 위해 버린다.
     let mut json_backup = if spool_path.as_os_str().is_empty() { Some(json) } else { None };
 
+    // critical은 non-critical의 2배까지 in-memory 재시도 후 파킹 (무한 재시도 금지)
+    let retry_limit: u64 = if has_critical {
+        (max_retries as u64).saturating_mul(2)
+    } else {
+        max_retries as u64
+    };
+
     let mut backoff = retry_base;
     let mut attempt: u64 = 0;
 
@@ -356,8 +382,8 @@ async fn send_with_backoff(
                 return;
             }
             Err(TransportError::RateLimited { retry_after }) => {
-                if !has_critical && attempt >= max_retries as u64 {
-                    warn!(attempts = attempt + 1, "rate-limit 한도 소진 — retry/로 이동");
+                if attempt >= retry_limit {
+                    log_give_up(has_critical, attempt, "rate-limit 한도 소진");
                     park_to_retry(&spool, &spool_path, json_backup.take(), event_total).await;
                     return;
                 }
@@ -365,8 +391,8 @@ async fn send_with_backoff(
                 tokio::time::sleep(Duration::from_secs(retry_after)).await;
             }
             Err(TransportError::Retryable(msg)) => {
-                if !has_critical && attempt >= max_retries as u64 {
-                    warn!(attempts = attempt + 1, "재시도 한도 소진 — retry/로 이동: {msg}");
+                if attempt >= retry_limit {
+                    log_give_up(has_critical, attempt, &format!("재시도 한도 소진: {msg}"));
                     park_to_retry(&spool, &spool_path, json_backup.take(), event_total).await;
                     return;
                 }
@@ -376,6 +402,16 @@ async fn send_with_backoff(
             }
         }
         attempt += 1;
+    }
+}
+
+/// 재시도 포기 로그 — critical은 유실 아님(디스크 보존)이지만 배달 지연이므로 error!.
+fn log_give_up(has_critical: bool, attempt: u64, reason: &str) {
+    if has_critical {
+        error!(attempts = attempt + 1,
+            "critical envelope {reason} — retry/로 파킹 (기동 replay 또는 /drain-spool로 배달)");
+    } else {
+        warn!(attempts = attempt + 1, "{reason} — retry/로 이동");
     }
 }
 
@@ -550,7 +586,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn critical_keeps_retrying_past_max_retries() {
-        // First 5 requests return 500, then 200 — critical should succeed eventually
+        // First 5 requests return 500, then 200 — critical은 2×max_retries(=6) 안에서
+        // non-critical 한도(3)를 넘겨도 계속 재시도해 성공해야 함
         let mut responses = vec![500u16; 5];
         responses.push(200);
         let url = start_response_server(responses).await;
@@ -561,6 +598,25 @@ mod tests {
             3, true, Arc::clone(&spool), 5, 300, // max_retries=3 but has_critical=true
         ).await;
         assert!(!path.exists(), "critical envelope must eventually succeed");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn critical_parks_to_retry_after_bounded_attempts() {
+        // 항상 Retryable(500) — critical도 2×max_retries 소진 후 retry/로 파킹하고
+        // 태스크가 종료되어야 함 (기존: 무한 재시도 → 장애 시 태스크·body 누적 OOM)
+        let url = start_response_server(vec![500; 20]).await;
+        let spool = make_spool();
+        let path = spool.save(&test_envelope()).unwrap();
+        send_with_backoff(
+            make_transport(&url), test_envelope(), path.clone(),
+            2, true, Arc::clone(&spool), 5, 300, // max_retries=2 → critical 한도 4
+        ).await;
+        // 여기 도달했다는 것 자체가 태스크가 유한하게 끝났다는 증거
+        assert!(!path.exists(), "critical envelope도 한도 소진 후 new/에서 이동해야 함");
+        let retry_path = path.parent().unwrap().parent().unwrap()
+            .join("retry").join(path.file_name().unwrap());
+        assert!(retry_path.exists(), "critical envelope은 retry/에 파킹되어야 함");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 
