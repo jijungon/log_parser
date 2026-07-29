@@ -74,6 +74,21 @@ static PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
             .unwrap(),
             "<IP6>",
         ),
+        // ── 알려진 카디널리티 증폭원 (감사 지적: 값마다 template이 갈라져 fingerprint 폭증) ──
+        // SSH 키 지문: "SHA256:" 뒤 base64 20자 이상 (sshd "Accepted publickey ... SHA256:…").
+        // 키마다 달라지므로 <FPR>로 고정. PATH/NUM보다 먼저 와야 함
+        // (base64 안의 '/'가 PATH로, '+'·'/' 옆 숫자가 NUM으로 쪼개지기 전에 통째로 치환).
+        (
+            Regex::new(r"SHA256:[A-Za-z0-9+/=]{20,}").unwrap(),
+            "SHA256:<FPR>",
+        ),
+        // 커널 스택 프레임 주소: "[<ffffffff8100abcd>]" (소문자 hex 8~16자리).
+        // 0x 접두가 없어 기존 long-hex 마스크(0x 필수)에 안 걸리던 케이스 → <ADDR>로 고정.
+        // NUM보다 먼저 와야 함 (전부 숫자인 주소가 <NUM>으로 쪼개지지 않게).
+        (
+            Regex::new(r"\[<[0-9a-f]{8,16}>\]").unwrap(),
+            "[<ADDR>]",
+        ),
         // ── 컨테이너/네트워크 런타임 ID (Docker 호스트 노이즈 → fingerprint 분산 주범) ──
         // 컨테이너마다 달라지는 랜덤 ID를 placeholder로 묶어 같은 사건이 한 template이 되게 한다.
         // PATH/HEX/NUM 보다 먼저 와야 함 (랜덤 ID가 NUM/HEX로 쪼개지기 전에 통째로 치환).
@@ -126,6 +141,9 @@ static PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
 // PATTERNS 전체를 한 번의 멀티패턴 스캔으로 검사하는 프리필터.
 // placeholder 문자열(<UUID> 등)은 숫자·콜론·슬래시·0x를 포함하지 않으므로
 // 앞선 치환이 뒤 패턴의 "새로운" 매치를 만들어낼 수 없다 → 원본 기준 판정이 안전하다.
+// 예외: "SHA256:<FPR>"의 "SHA256:"은 원본 매치에 있던 텍스트를 그대로 보존한 것 —
+// "256"은 앞이 단어문자('A')라 \b 경계가 없어 NUM에 안 걸리고, 콜론 1개는
+// 다중 콜론(IPv6·MAC)을 만들 수 없으므로 위 불변식이 유지된다.
 static PATTERN_SET: Lazy<regex::RegexSet> = Lazy::new(|| {
     regex::RegexSet::new(PATTERNS.iter().map(|(re, _)| re.as_str())).unwrap()
 });
@@ -308,5 +326,86 @@ mod tests {
         let result = normalize("id=550e8400-e29b-41d4-a716-446655440000");
         assert!(result.contains("<UUID>"), "got: {result}");
         assert!(!result.contains("<NUM>"), "UUID should not become NUM: {result}");
+    }
+
+    #[test]
+    fn ssh_fingerprints_merge_to_same_template() {
+        // 서로 다른 키 지문 → 같은 template (카디널리티 증폭 차단)
+        let a = normalize(
+            "Accepted publickey for root from 10.0.0.5 port 22 ssh2: ED25519 SHA256:Xk3j9dK2mQ7pL0aBqTz8WvYxCd4EfGh1RsUu",
+        );
+        let b = normalize(
+            "Accepted publickey for root from 10.0.0.5 port 22 ssh2: ED25519 SHA256:uJ9mPq2LwX+ab/cdEFGH1234ijklMNOP=",
+        );
+        assert_eq!(a, b, "다른 지문은 같은 template이어야 함");
+        assert_eq!(
+            a,
+            "Accepted publickey for root from <IP4> port <NUM> ssh2: ED25519 SHA256:<FPR>"
+        );
+    }
+
+    #[test]
+    fn ssh_fingerprint_not_split_by_path_or_num() {
+        // base64 안의 '/'가 PATH로, 숫자가 NUM으로 쪼개지면 안 됨
+        let result = normalize("SHA256:ab/cd/ef12345678GHijklMNopQR+=");
+        assert_eq!(result, "SHA256:<FPR>", "got: {result}");
+    }
+
+    #[test]
+    fn fpr_mask_negatives() {
+        // 20자 미만 base64는 지문으로 안 봄
+        assert_eq!(normalize("SHA256:shortvalue mismatch"), "SHA256:shortvalue mismatch");
+        // 산문 속 "SHA256:" (콜론 뒤 긴 base64 없음)
+        assert_eq!(
+            normalize("checksum algorithm SHA256: enabled by default"),
+            "checksum algorithm SHA256: enabled by default"
+        );
+        // SHA256: 접두 없는 평범한 base64풍 긴 단어는 건드리지 않음 (보수적)
+        assert_eq!(
+            normalize("token abcDEFghiJKLmnoPQRstu kept"),
+            "token abcDEFghiJKLmnoPQRstu kept"
+        );
+    }
+
+    #[test]
+    fn kernel_stack_addrs_merge_to_same_template() {
+        // 서로 다른 프레임 주소 → 같은 template
+        let a = normalize("[<ffffffff8100abcd>] do_something+0x12/0x40");
+        let b = normalize("[<ffffffff8200ef01>] do_something+0x12/0x40");
+        assert_eq!(a, b, "다른 주소는 같은 template이어야 함");
+        assert_eq!(a, "[<ADDR>] do_something+0x12/0x40");
+        // 8자리(32비트) 주소도 잡아야 함
+        assert_eq!(normalize("[<c1234abc>] handler"), "[<ADDR>] handler");
+    }
+
+    #[test]
+    fn kernel_addr_all_digits_not_split_into_num() {
+        // 전부 숫자인 주소도 <NUM>이 아니라 <ADDR>여야 함
+        let result = normalize("[<1234567890123456>] frame");
+        assert_eq!(result, "[<ADDR>] frame", "got: {result}");
+    }
+
+    #[test]
+    fn addr_mask_negatives() {
+        // 대문자 hex는 커널 프레임 형식이 아님 → 그대로
+        assert_eq!(normalize("[<FFFFFFFFDEADBEEF>] x"), "[<FFFFFFFFDEADBEEF>] x");
+        // 7자리(너무 짧음)·17자리(너무 김)는 안 잡음
+        assert_eq!(normalize("[<abcdef1>] x"), "[<abcdef1>] x");
+        assert_eq!(normalize("[<ffffffff8100abcd1>] x"), "[<ffffffff8100abcd1>] x");
+        // placeholder풍 텍스트를 먹으면 안 됨
+        assert_eq!(normalize("literal [<NUM>] stays"), "literal [<NUM>] stays");
+    }
+
+    #[test]
+    fn new_masks_do_not_eat_existing_tokens() {
+        // MAC·IPv6·UUID는 기존 placeholder 그대로 (새 마스크가 선점하면 안 됨)
+        assert_eq!(normalize("device aa:bb:cc:dd:ee:ff connected"), "device <HEX> connected");
+        assert_eq!(normalize("link to fe80::1 ready"), "link to <IP6> ready");
+        assert_eq!(
+            normalize("session 550e8400-e29b-41d4-a716-446655440000 started"),
+            "session <UUID> started"
+        );
+        let combined = normalize("peer fe80::a00:27ff:fe4e:66a1 key SHA256:Xk3j9dK2mQ7pL0aBqTz8Wv");
+        assert_eq!(combined, "peer <IP6> key SHA256:<FPR>", "got: {combined}");
     }
 }
