@@ -50,7 +50,8 @@ pub async fn run_pipeline(
     for path in spool.pending() {
         let sp_load = Arc::clone(&spool);
         let path_owned = path.clone();
-        let envelope = match tokio::task::spawn_blocking(move || sp_load.load(&path_owned))
+        // load_or_quarantine: 파싱 실패(잘린 파일 등)는 corrupt/로 격리 — 매 기동 반복 실패 방지
+        let envelope = match tokio::task::spawn_blocking(move || sp_load.load_or_quarantine(&path_owned))
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("WAL load spawn_blocking 패닉: {e}")))
         {
