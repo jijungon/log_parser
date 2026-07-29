@@ -1,6 +1,5 @@
 use crate::inbound::{check_auth, InboundState};
 use crate::transport;
-use anyhow;
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -9,46 +8,13 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
-};
-use tokio::sync::RwLock;
+use std::sync::{atomic::Ordering, Arc};
 use tracing::{info, warn};
-use ulid::Ulid;
 
-// ── DrainState ────────────────────────────────────────────────────────────────
-
-/// drain 작업의 진행 상태. InboundState에 직접 포함 (Arc<InboundState>로 공유).
-pub struct DrainState {
-    pub in_progress: AtomicBool,
-    pub drain_id: RwLock<Option<String>>,
-    pub window_from: RwLock<Option<DateTime<Utc>>>,
-    pub window_to: RwLock<Option<DateTime<Utc>>>,
-    pub queued: AtomicU64,
-    pub remaining: AtomicU64,
-    pub succeeded: AtomicU64,
-    pub failed: AtomicU64,
-    pub started_at: RwLock<Option<DateTime<Utc>>>,
-    pub completed_at: RwLock<Option<DateTime<Utc>>>,
-}
-
-impl Default for DrainState {
-    fn default() -> Self {
-        Self {
-            in_progress: AtomicBool::new(false),
-            drain_id: RwLock::new(None),
-            window_from: RwLock::new(None),
-            window_to: RwLock::new(None),
-            queued: AtomicU64::new(0),
-            remaining: AtomicU64::new(0),
-            succeeded: AtomicU64::new(0),
-            failed: AtomicU64::new(0),
-            started_at: RwLock::new(None),
-            completed_at: RwLock::new(None),
-        }
-    }
-}
+// drain 코어(상태·가드·백그라운드 태스크)는 transport::drain으로 이동 —
+// coordinator의 수신 복구 자동 drain과 in_progress 가드를 공유하기 위함.
+// 기존 경로(crate::inbound::drain::DrainState) 호환을 위해 재노출한다.
+pub use crate::transport::drain::DrainState;
 
 // ── 요청/응답 타입 ──────────────────────────────────────────────────────────────
 
@@ -145,13 +111,19 @@ pub async fn handle_drain_spool(
             .into_response();
     }
 
-    // 중복 drain 방지
-    if st
-        .drain_state
-        .in_progress
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    // drain 코어 시작 — in_progress 가드는 coordinator의 자동 drain과 공유 (transport::drain)
+    let started = transport::drain::try_start(
+        Arc::clone(&st.drain_state),
+        Arc::clone(&st.spool),
+        st.transport_cfg.clone(),
+        from,
+        to,
+        "http",
+    )
+    .await;
+
+    // 중복 drain 방지 — 가드 획득 실패 시 진행 중 drain 정보와 함께 409
+    let Some(started) = started else {
         let drain_id = st.drain_state.drain_id.read().await.clone();
         let remaining = st.drain_state.remaining.load(Ordering::SeqCst);
         let started_at = st.drain_state.started_at.read().await.map(|t| t.to_rfc3339());
@@ -167,54 +139,17 @@ pub async fn handle_drain_spool(
             Json(DrainConflict { status: "in_progress", drain_id, remaining, started_at, window }),
         )
             .into_response();
-    }
+    };
 
-    // 대상 파일 목록 — drain_window는 fs::read_dir, metadata는 fs::metadata: spawn_blocking으로 executor 보호
-    let sp_dw = Arc::clone(&st.spool);
-    let files = tokio::task::spawn_blocking(move || {
-        let files = sp_dw.drain_window(from, to);
-        let bytes: u64 = files
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
-        (files, bytes)
-    })
-    .await
-    .unwrap_or_else(|e| {
-        warn!("drain_window spawn_blocking 패닉: {e} — 빈 목록으로 처리");
-        (vec![], 0)
-    });
-    let (files, bytes) = files;
-    let queued = files.len();
-
-    let drain_id = Ulid::new().to_string();
-    let now = Utc::now();
-
-    // 상태 초기화
-    *st.drain_state.drain_id.write().await = Some(drain_id.clone());
-    *st.drain_state.window_from.write().await = Some(from);
-    *st.drain_state.window_to.write().await = Some(to);
-    st.drain_state.queued.store(queued as u64, Ordering::SeqCst);
-    st.drain_state.remaining.store(queued as u64, Ordering::SeqCst);
-    st.drain_state.succeeded.store(0, Ordering::SeqCst);
-    st.drain_state.failed.store(0, Ordering::SeqCst);
-    *st.drain_state.started_at.write().await = Some(now);
-    *st.drain_state.completed_at.write().await = None;
-
-    info!(drain_id, queued, "drain-spool 시작");
-
-    // Transport는 실제 파일이 있을 때만 생성 (백그라운드 태스크 내부에서 lazy 생성)
-    let st2 = Arc::clone(&st);
-    tokio::spawn(async move { drain_task(st2, files).await });
+    info!(drain_id = %started.drain_id, queued = started.queued, "drain-spool 시작");
 
     (
         StatusCode::ACCEPTED,
         Json(DrainAccepted {
-            drain_id,
+            drain_id: started.drain_id,
             window: WindowInfo { from: from.to_rfc3339(), to: to.to_rfc3339() },
-            queued,
-            bytes,
+            queued: started.queued,
+            bytes: started.bytes,
         }),
     )
         .into_response()
@@ -271,88 +206,6 @@ pub async fn handle_drain_status(
     .into_response()
 }
 
-// ── 백그라운드 drain 태스크 ─────────────────────────────────────────────────────
-
-/// panic 또는 cancellation 시에도 in_progress를 false로 복원하는 RAII 가드
-struct InProgressGuard<'a>(&'a AtomicBool);
-impl Drop for InProgressGuard<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-
-async fn drain_task(st: Arc<InboundState>, files: Vec<std::path::PathBuf>) {
-    let _guard = InProgressGuard(&st.drain_state.in_progress);
-    // Transport는 실제 전송할 파일이 있을 때만 생성
-    let transport = if files.is_empty() {
-        None
-    } else {
-        match transport::create(&st.transport_cfg) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                warn!("drain transport 생성 실패 — 전체 실패 처리: {e}");
-                let n = files.len() as u64;
-                st.drain_state.failed.fetch_add(n, Ordering::SeqCst);
-                st.drain_state.remaining.store(0, Ordering::SeqCst);
-                *st.drain_state.completed_at.write().await = Some(Utc::now());
-                return; // _guard가 in_progress = false 처리
-            }
-        }
-    };
-
-    // files 비어있으면 transport는 None — 루프 진입 전 추출해 unwrap 제거
-    let transport = match transport {
-        Some(t) => t,
-        None => {
-            *st.drain_state.completed_at.write().await = Some(Utc::now());
-            return; // files 없음, _guard가 in_progress = false 처리
-        }
-    };
-
-    for path in &files {
-        // spool.load/drain_commit은 std::fs — spawn_blocking으로 executor 스레드 보호
-        let sp_load = Arc::clone(&st.spool);
-        let path_owned = path.clone();
-        let envelope = match tokio::task::spawn_blocking(move || sp_load.load(&path_owned))
-            .await
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("drain load spawn_blocking 패닉: {e}")))
-        {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(path = %path.display(), err = %e, "drain: envelope 로드 실패 — 스킵");
-                st.drain_state.failed.fetch_add(1, Ordering::SeqCst);
-                st.drain_state.remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1))).ok();
-                continue;
-            }
-        };
-
-        match transport.send(&envelope).await {
-            Ok(()) => {
-                let sp_commit = Arc::clone(&st.spool);
-                let path_commit = path.clone();
-                if let Err(e) = tokio::task::spawn_blocking(move || sp_commit.drain_commit(&path_commit)).await {
-                    warn!(path = %path.display(), "drain_commit spawn_blocking 패닉: {e}");
-                }
-                st.drain_state.succeeded.fetch_add(1, Ordering::SeqCst);
-                info!(path = %path.display(), "drain: 전송 성공");
-            }
-            Err(e) => {
-                warn!(path = %path.display(), err = %e, "drain: 전송 실패 — 파일 유지");
-                st.drain_state.failed.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        st.drain_state.remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1))).ok();
-    }
-
-    *st.drain_state.completed_at.write().await = Some(Utc::now());
-    // _guard가 함수 종료 시 in_progress = false 처리
-
-    let succeeded = st.drain_state.succeeded.load(Ordering::SeqCst);
-    let failed = st.drain_state.failed.load(Ordering::SeqCst);
-    let drain_id = st.drain_state.drain_id.read().await.clone().unwrap_or_default();
-    info!(drain_id, succeeded, failed, "drain-spool 완료");
-}
-
 // ── 테스트 ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -393,7 +246,7 @@ mod tests {
             boot_id: "bid".to_string(),
             static_state_enabled: false,
             log_paths: vec![],
-            drain_state: DrainState::default(),
+            drain_state: Arc::new(DrainState::default()),
             spool,
             transport_cfg: TransportConfig::default(),
         })
@@ -528,7 +381,7 @@ mod tests {
             boot_id: "bid".to_string(),
             static_state_enabled: false,
             log_paths: vec![],
-            drain_state: DrainState::default(),
+            drain_state: Arc::new(DrainState::default()),
             spool,
             transport_cfg: TransportConfig::default(),
         });
@@ -593,7 +446,7 @@ mod tests {
             boot_id: "bid".to_string(),
             static_state_enabled: false,
             log_paths: vec![],
-            drain_state: DrainState::default(),
+            drain_state: Arc::new(DrainState::default()),
             spool,
             transport_cfg: TransportConfig::default(),
         });
@@ -772,7 +625,7 @@ mod tests {
             boot_id: "bid".to_string(),
             static_state_enabled: false,
             log_paths: vec![],
-            drain_state: DrainState::default(),
+            drain_state: Arc::new(DrainState::default()),
             spool: Arc::clone(&spool),
             transport_cfg,
         });

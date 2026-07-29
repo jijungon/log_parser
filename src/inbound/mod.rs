@@ -46,8 +46,8 @@ pub struct InboundState {
     pub static_state_enabled: bool,
     // log paths for sos
     pub log_paths: Vec<String>,
-    // drain
-    pub drain_state:   DrainState,
+    // drain — DrainState는 coordinator의 자동 drain과 가드를 공유 (main에서 Arc 생성)
+    pub drain_state:   Arc<DrainState>,
     pub spool:         Arc<Spool>,
     pub transport_cfg: TransportConfig,
 }
@@ -158,6 +158,7 @@ pub async fn serve(
     log_paths: Vec<String>,
     spool: Arc<Spool>,
     transport_cfg: TransportConfig,
+    drain_state: Arc<DrainState>,
 ) -> anyhow::Result<()> {
     // collection endpoints get 10× the flush rate (min 60/hour = 1/minute)
     let collection_rate_per_hour = (rate_limit_per_hour * 10).max(60);
@@ -178,7 +179,7 @@ pub async fn serve(
         boot_id,
         static_state_enabled,
         log_paths,
-        drain_state: DrainState::default(),
+        drain_state,
         spool,
         transport_cfg,
     });

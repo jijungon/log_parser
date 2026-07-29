@@ -99,6 +99,13 @@ async fn main() -> Result<()> {
     );
     let transport = transport::create(&cfg.transport).context("transport 초기화 실패")?;
 
+    // drain 상태 — HTTP /drain-spool(inbound)과 coordinator의 수신 복구 자동 drain이
+    // in_progress 가드를 공유해 동시에 하나의 drain만 실행되도록 한다.
+    let drain_state = Arc::new(transport::drain::DrainState::default());
+    if !cfg.transport.auto_drain {
+        info!("transport.auto_drain=false — retry/ 자동 drain 비활성 (수동 /drain-spool만 사용)");
+    }
+
     // ── Step 2: transport smoke test ──────────────────────────────────────────
 
     if !cfg.transport.endpoint.is_empty() {
@@ -252,6 +259,12 @@ async fn main() -> Result<()> {
         let boot_id_for_pipeline = boot_id.clone();
         let spool_for_pipeline = Arc::clone(&spool);
         let transport_for_pipeline = Arc::clone(&transport);
+        // 라이브 전송 성공 시 retry/ 자동 drain 트리거 핸들 (transport.auto_drain으로 on/off)
+        let auto_drain = transport::drain::AutoDrainHandle::new(
+            Arc::clone(&drain_state),
+            Arc::clone(&spool),
+            cfg.transport.clone(),
+        );
         tokio::spawn(async move {
             coordinator::run_pipeline(
                 event_rx,
@@ -270,6 +283,7 @@ async fn main() -> Result<()> {
                 seq_state_path,
                 spool_for_pipeline,
                 transport_for_pipeline,
+                Some(auto_drain),
                 shutdown_rx,
             )
             .await
@@ -340,6 +354,7 @@ async fn main() -> Result<()> {
         let host_id2 = host_id.clone();
         let boot_id2 = boot_id.clone();
         let spool_for_inbound = Arc::clone(&spool);
+        let drain_state_for_inbound = Arc::clone(&drain_state);
         tokio::spawn(async move {
             inbound::serve(
                 &listen_addr,
@@ -359,6 +374,7 @@ async fn main() -> Result<()> {
                 log_paths,
                 spool_for_inbound,
                 transport_cfg,
+                drain_state_for_inbound,
             ).await
         })
     };

@@ -1,3 +1,4 @@
+pub mod drain;
 pub mod http;
 pub mod spool;
 
