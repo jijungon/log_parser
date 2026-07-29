@@ -7,6 +7,7 @@ use crate::normalize::categories::CategoryMatcher;
 use crate::pipeline::raw_event::RawLogEvent;
 use crate::pipeline::vector_spawn::VectorHandle;
 use crate::transport::TransportError;
+use crate::transport::drain::AutoDrainHandle;
 use crate::transport::http::HttpJsonTransport;
 use crate::transport::spool::Spool;
 use anyhow::Result;
@@ -40,6 +41,7 @@ pub async fn run_pipeline(
     seq_state_path: String,
     spool: Arc<Spool>,
     transport: Arc<HttpJsonTransport>,
+    auto_drain: Option<AutoDrainHandle>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let t = transport;
@@ -69,9 +71,10 @@ pub async fn run_pipeline(
         let permit = Arc::clone(&replay_sem).acquire_owned().await.unwrap();
         let retry_base = transport_cfg.retry_base_seconds;
         let retry_max  = transport_cfg.retry_max_seconds;
+        let drain = auto_drain.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            send_with_backoff(t2, envelope, path, max, has_critical, sp2, retry_base, retry_max).await;
+            send_with_backoff(t2, envelope, path, max, has_critical, sp2, retry_base, retry_max, drain).await;
         });
     }
 
@@ -226,13 +229,14 @@ pub async fn run_pipeline(
                         let sem = Arc::clone(&live_send_sem);
                         let retry_base = transport_cfg.retry_base_seconds;
                         let retry_max  = transport_cfg.retry_max_seconds;
+                        let drain = auto_drain.clone();
                         tokio::spawn(async move {
                             // 동시 전송 4개 상한 — 대기 중엔 압축 body를 만들지 않는다
                             let _permit = match sem.acquire_owned().await {
                                 Ok(p) => p,
                                 Err(_) => return, // semaphore closed — 발생 안 함
                             };
-                            send_with_backoff(t2, envelope, path, max, has_critical, sp2, retry_base, retry_max).await;
+                            send_with_backoff(t2, envelope, path, max, has_critical, sp2, retry_base, retry_max, drain).await;
                         });
                     }
                     Err(e) => {
@@ -244,12 +248,13 @@ pub async fn run_pipeline(
                         let sem = Arc::clone(&live_send_sem);
                         let retry_base = transport_cfg.retry_base_seconds;
                         let retry_max  = transport_cfg.retry_max_seconds;
+                        let drain = auto_drain.clone();
                         tokio::spawn(async move {
                             let _permit = match sem.acquire_owned().await {
                                 Ok(p) => p,
                                 Err(_) => return,
                             };
-                            send_with_backoff(t2, envelope, PathBuf::new(), max, has_critical, sp2, retry_base, retry_max).await;
+                            send_with_backoff(t2, envelope, PathBuf::new(), max, has_critical, sp2, retry_base, retry_max, drain).await;
                         });
                     }
                 }
@@ -317,6 +322,9 @@ fn envelope_has_critical(env: &Envelope) -> bool {
 /// 수 시간 누적돼 128MB cgroup 안에서 OOM되는 것보다 파킹 후
 /// 기동 replay / POST /drain-spool 배달이 안전하다 (원칙 #1은 디스크 보존으로 유지).
 /// (max_retries=N → 1회 초기 전송 + N회 재시도 = 최대 N+1회)
+/// 전송 성공은 수신 서버 복구의 신호 — auto_drain이 있으면 retry/에 파킹된
+/// envelope의 자동 drain을 트리거한다 (성공 1회당 시도 1회, retry/ 비면 no-op).
+#[allow(clippy::too_many_arguments)]
 async fn send_with_backoff(
     t: Arc<HttpJsonTransport>,
     envelope: Envelope,
@@ -326,6 +334,7 @@ async fn send_with_backoff(
     spool: Arc<Spool>,
     retry_base: u64,
     retry_max: u64,
+    auto_drain: Option<AutoDrainHandle>,
 ) {
     let event_total = envelope.headers.counts.as_ref()
         .map(|c| c.by_severity.critical + c.by_severity.error + c.by_severity.warn + c.by_severity.info)
@@ -373,6 +382,10 @@ async fn send_with_backoff(
                     info!(attempts = attempt + 1, "재시도 후 전송 성공");
                 } else {
                     info!("envelope 전송 성공");
+                }
+                // 수신 복구 신호 — retry/에 파킹된 envelope 자동 drain (백그라운드, 논블로킹)
+                if let Some(drain) = &auto_drain {
+                    drain.trigger();
                 }
                 return;
             }
@@ -451,6 +464,7 @@ async fn park_to_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::drain::DrainState;
     use axum::{http::StatusCode as AxumStatus, routing::post, Router};
     use std::collections::VecDeque;
     use std::sync::Arc as StdArc;
@@ -486,6 +500,41 @@ mod tests {
     fn make_spool() -> Arc<Spool> {
         let dir = unique_temp_dir("spool_backoff");
         Arc::new(Spool::new(dir.to_str().unwrap(), 10).unwrap())
+    }
+
+    /// 자동 drain 핸들 생성 — drain_task가 transport::create로 실제 전송기를
+    /// 만들 수 있게 endpoint/token_env를 갖춘 TransportConfig를 구성한다.
+    /// 반환된 token_env는 테스트 종료 시 remove_var로 정리할 것.
+    fn make_auto_drain_handle(
+        spool: &Arc<Spool>,
+        endpoint: &str,
+        auto_drain: bool,
+    ) -> (AutoDrainHandle, String) {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        // 병렬 테스트 간 env var 충돌 방지 — pid + counter로 유일성 보장
+        let token_env = format!(
+            "AUTO_DRAIN_TOKEN_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
+        );
+        std::env::set_var(&token_env, "test-token");
+        let cfg = TransportConfig {
+            kind: "http_json".to_string(),
+            endpoint: endpoint.to_string(),
+            token_env: token_env.clone(),
+            tls_enabled: false,
+            connect_timeout_seconds: 5,
+            request_timeout_seconds: 5,
+            auto_drain,
+            ..TransportConfig::default()
+        };
+        let handle = AutoDrainHandle::new(
+            Arc::new(DrainState::default()),
+            Arc::clone(spool),
+            cfg,
+        );
+        (handle, token_env)
     }
 
     /// Returns a process-unique temp dir path for test isolation.
@@ -543,7 +592,7 @@ mod tests {
         let path = spool.save(&test_envelope()).unwrap();
         send_with_backoff(
             make_transport(&url), test_envelope(), path.clone(),
-            5, false, Arc::clone(&spool), 5, 300,
+            5, false, Arc::clone(&spool), 5, 300, None,
         ).await;
         // Fatal → moved to retry/ (not left in new/)
         assert!(!path.exists(), "new/ file should be moved out on Fatal");
@@ -560,7 +609,7 @@ mod tests {
         let path = spool.save(&test_envelope()).unwrap();
         send_with_backoff(
             make_transport(&url), test_envelope(), path.clone(),
-            5, false, Arc::clone(&spool), 5, 300,
+            5, false, Arc::clone(&spool), 5, 300, None,
         ).await;
         assert!(!path.exists(), "spool file should be deleted on success");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
@@ -574,7 +623,7 @@ mod tests {
         let path = spool.save(&test_envelope()).unwrap();
         send_with_backoff(
             make_transport(&url), test_envelope(), path.clone(),
-            3, false, Arc::clone(&spool), 5, 300,
+            3, false, Arc::clone(&spool), 5, 300, None,
         ).await;
         // Retryable exhausted → moved to retry/ for explicit drain
         assert!(!path.exists(), "new/ file should be moved to retry/ after exhaustion");
@@ -595,7 +644,7 @@ mod tests {
         let path = spool.save(&test_envelope()).unwrap();
         send_with_backoff(
             make_transport(&url), test_envelope(), path.clone(),
-            3, true, Arc::clone(&spool), 5, 300, // max_retries=3 but has_critical=true
+            3, true, Arc::clone(&spool), 5, 300, None, // max_retries=3 but has_critical=true
         ).await;
         assert!(!path.exists(), "critical envelope must eventually succeed");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
@@ -610,7 +659,7 @@ mod tests {
         let path = spool.save(&test_envelope()).unwrap();
         send_with_backoff(
             make_transport(&url), test_envelope(), path.clone(),
-            2, true, Arc::clone(&spool), 5, 300, // max_retries=2 → critical 한도 4
+            2, true, Arc::clone(&spool), 5, 300, None, // max_retries=2 → critical 한도 4
         ).await;
         // 여기 도달했다는 것 자체가 태스크가 유한하게 끝났다는 증거
         assert!(!path.exists(), "critical envelope도 한도 소진 후 new/에서 이동해야 함");
@@ -629,7 +678,7 @@ mod tests {
         let spool = Arc::new(Spool::new(dir.to_str().unwrap(), 10).unwrap());
         send_with_backoff(
             make_transport(&url), test_envelope(), PathBuf::new(),
-            2, false, Arc::clone(&spool), 5, 300,
+            2, false, Arc::clone(&spool), 5, 300, None,
         ).await;
 
         assert_eq!(spool.retry_count(), 1, "빈 경로 envelope은 retry/에 직접 저장되어야 함");
@@ -651,13 +700,139 @@ mod tests {
         let path = spool.save(&test_envelope()).unwrap();
         send_with_backoff(
             make_transport(&url), test_envelope(), path.clone(),
-            2, false, Arc::clone(&spool), 1, 10, // max_retries=2
+            2, false, Arc::clone(&spool), 1, 10, None, // max_retries=2
         ).await;
         assert!(!path.exists(), "new/ file should be moved out after RateLimited exhaustion");
         let retry_path = path.parent().unwrap().parent().unwrap()
             .join("retry").join(path.file_name().unwrap());
         assert!(retry_path.exists(), "file should be in retry/ after RateLimited exhaustion");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    // ── 자동 drain (수신 복구 시 retry/ 재전송) ──────────────────────────────────
+
+    #[tokio::test]
+    async fn auto_drain_after_live_success_drains_retry_file() {
+        // 장애 기간에 파킹된 retry/ 파일 + 복구된 수신 서버(모두 200)
+        let url = start_response_server(vec![200, 200]).await;
+        let spool = make_spool();
+        let parked = spool.save(&test_envelope()).unwrap();
+        let base = parked.parent().unwrap().parent().unwrap().to_path_buf();
+        spool.move_to_retry(&parked);
+        assert_eq!(spool.retry_count(), 1, "사전 조건: retry/에 1개 파킹");
+
+        let (handle, token_env) = make_auto_drain_handle(&spool, &url, true);
+
+        // 라이브 cycle 전송 성공 → 수신 복구 신호 → 자동 drain 트리거
+        let path = spool.save(&test_envelope()).unwrap();
+        send_with_backoff(
+            make_transport(&url), test_envelope(), path,
+            5, false, Arc::clone(&spool), 5, 300, Some(handle.clone()),
+        ).await;
+
+        // 백그라운드 drain 완료 대기 — 고정 sleep 대신 polling으로 flakiness 방지
+        let state = handle.state();
+        for _ in 0..200 {
+            if state.drain_id.read().await.is_some()
+                && !state.in_progress.load(Ordering::SeqCst)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(state.drain_id.read().await.is_some(), "자동 drain이 시작되어야 함");
+        assert!(!state.in_progress.load(Ordering::SeqCst), "drain은 2초 내 완료되어야 함");
+        assert_eq!(state.succeeded.load(Ordering::SeqCst), 1,
+            "retry/ 파일이 재전송(drain_commit)되어야 함");
+        assert_eq!(state.failed.load(Ordering::SeqCst), 0);
+        assert!(state.completed_at.read().await.is_some(),
+            "status=completed (completed_at 기록)");
+        assert_eq!(spool.retry_count(), 0, "전송 성공한 retry/ 파일은 삭제되어야 함");
+
+        std::env::remove_var(&token_env);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn auto_drain_not_started_when_retry_empty() {
+        let url = start_response_server(vec![200]).await;
+        let spool = make_spool();
+        let (handle, token_env) = make_auto_drain_handle(&spool, &url, true);
+
+        let path = spool.save(&test_envelope()).unwrap();
+        let base = path.parent().unwrap().parent().unwrap().to_path_buf();
+        send_with_backoff(
+            make_transport(&url), test_envelope(), path,
+            5, false, Arc::clone(&spool), 5, 300, Some(handle.clone()),
+        ).await;
+
+        // retry_count()==0 선확인에서 끝나므로 drain 태스크 자체가 spawn되지 않는다
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(handle.state().drain_id.read().await.is_none(),
+            "retry/ 비어 있으면 drain 미시작");
+        assert!(!handle.state().in_progress.load(Ordering::SeqCst));
+
+        std::env::remove_var(&token_env);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn auto_drain_skipped_while_drain_guard_held() {
+        let url = start_response_server(vec![200]).await;
+        let spool = make_spool();
+        let parked = spool.save(&test_envelope()).unwrap();
+        let base = parked.parent().unwrap().parent().unwrap().to_path_buf();
+        spool.move_to_retry(&parked);
+
+        let (handle, token_env) = make_auto_drain_handle(&spool, &url, true);
+        // HTTP drain 진행 중 상황 재현 — 공유 가드 점유
+        handle.state().in_progress.store(true, Ordering::SeqCst);
+
+        let path = spool.save(&test_envelope()).unwrap();
+        send_with_backoff(
+            make_transport(&url), test_envelope(), path,
+            5, false, Arc::clone(&spool), 5, 300, Some(handle.clone()),
+        ).await;
+
+        // 트리거 태스크가 CAS 실패로 스킵할 시간을 준다
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(spool.retry_count(), 1,
+            "가드 점유 중엔 retry/ 파일이 전송되면 안 됨 (이중 전송 방지)");
+        assert!(handle.state().drain_id.read().await.is_none(),
+            "자동 drain이 시작되면 안 됨");
+        assert!(handle.state().in_progress.load(Ordering::SeqCst),
+            "기존 가드는 그대로 유지되어야 함");
+
+        handle.state().in_progress.store(false, Ordering::SeqCst);
+        std::env::remove_var(&token_env);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn auto_drain_disabled_never_triggers() {
+        let url = start_response_server(vec![200]).await;
+        let spool = make_spool();
+        let parked = spool.save(&test_envelope()).unwrap();
+        let base = parked.parent().unwrap().parent().unwrap().to_path_buf();
+        spool.move_to_retry(&parked);
+
+        // transport.auto_drain=false — 운영자 비활성화
+        let (handle, token_env) = make_auto_drain_handle(&spool, &url, false);
+
+        let path = spool.save(&test_envelope()).unwrap();
+        send_with_backoff(
+            make_transport(&url), test_envelope(), path,
+            5, false, Arc::clone(&spool), 5, 300, Some(handle.clone()),
+        ).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(spool.retry_count(), 1, "auto_drain=false — retry/ 파일 그대로");
+        assert!(handle.state().drain_id.read().await.is_none(), "drain 미시작");
+        assert!(!handle.state().in_progress.load(Ordering::SeqCst));
+
+        std::env::remove_var(&token_env);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn test_raw_event(msg: &str) -> RawLogEvent {
@@ -707,6 +882,7 @@ mod tests {
             String::new(),
             Arc::clone(&spool),
             transport,
+            None,
             shutdown_rx,
         ));
 
@@ -752,7 +928,7 @@ mod tests {
             CategoryMatcher::fallback(),
             "test-host".to_string(), "hid".to_string(), "bid".to_string(),
             vector_handle, 0, 0, 1, String::new(),
-            Arc::clone(&spool), transport, shutdown_rx,
+            Arc::clone(&spool), transport, None, shutdown_rx,
         ));
 
         shutdown_tx.send(true).unwrap();

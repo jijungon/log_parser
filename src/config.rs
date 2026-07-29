@@ -106,6 +106,10 @@ pub struct TransportConfig {
     /// retry/ 데드레터 보관 기간 (시간, 0 = 무기한). 초과 파일 삭제.
     #[serde(default = "default_retry_ttl_hours")]
     pub retry_ttl_hours: u64,
+    /// 라이브 전송 성공(수신 복구 신호) 시 retry/ 데드레터 자동 drain 여부.
+    /// false면 기존처럼 수동 POST /drain-spool 로만 재전송.
+    #[serde(default = "default_true")]
+    pub auto_drain: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +228,7 @@ impl Default for TransportConfig {
             http_gzip_level: default_gzip_level(),
             retry_max_mb: default_retry_max_mb(),
             retry_ttl_hours: default_retry_ttl_hours(),
+            auto_drain: true,
         }
     }
 }
@@ -312,6 +317,7 @@ mod tests {
         assert_eq!(cfg.transport.spool_max_mb, 2048);
         assert_eq!(cfg.transport.retry_max_mb, 1024);
         assert_eq!(cfg.transport.retry_ttl_hours, 168);
+        assert!(cfg.transport.auto_drain, "auto_drain 기본값은 true");
         assert_eq!(cfg.inbound.rate_limit_per_hour, 6);
         assert_eq!(cfg.inbound.body_size_limit_bytes, 1024);
         assert_eq!(cfg.inbound.envelope_size_limit_mb, 10);
@@ -327,6 +333,12 @@ mod tests {
         assert_eq!(cfg.dedup.window_seconds, 60);
         // unset fields still use defaults
         assert_eq!(cfg.dedup.lru_cap, 50000);
+    }
+
+    #[test]
+    fn transport_auto_drain_disable_parsed() {
+        let cfg = parse("transport:\n  auto_drain: false\n");
+        assert!(!cfg.transport.auto_drain);
     }
 
     #[test]

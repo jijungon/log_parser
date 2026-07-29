@@ -334,7 +334,7 @@ mod tests {
             boot_id: "bid".to_string(),
             static_state_enabled: true,
             log_paths,
-            drain_state: crate::inbound::drain::DrainState::default(),
+            drain_state: Arc::new(crate::inbound::drain::DrainState::default()),
             spool: test_spool(),
             transport_cfg: crate::config::TransportConfig::default(),
         })
