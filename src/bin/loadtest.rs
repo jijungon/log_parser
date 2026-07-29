@@ -15,9 +15,10 @@
 //! 5% CPU cap이 켜진 실환경 벽시계는 대략 이 수치의 ×20으로 외삽한다.
 //!
 //! 주의2: 모든 라인이 같은 타임스탬프라 dedup 창이 '시간으로' 비워지지 않는다(worst case).
-//! 따라서 고유 패턴이 lru_cap을 넘으면 LRU폐기로 나타나는데, 이는 **메모리 상한을 지키려는
-//! 백프레셔**(OOM 대신 오래된 패턴 폐기)를 증명한다. 실운영은 창이 30초마다 회전하므로,
-//! '30초 안에' 고유 패턴이 lru_cap을 넘는 극단적 경우에만 폐기가 발생한다.
+//! 따라서 고유 패턴이 lru_cap을 넘으면 LRU조기방출로 나타나는데, 이는 **메모리 상한을 지키려는
+//! 백프레셔**(OOM 대신 오래된 패턴을 다음 flush로 조기 방출, 유실 0)를 증명한다.
+//! 실운영은 창이 30초마다 회전하므로, '30초 안에' 고유 패턴이 lru_cap을 넘는 극단적
+//! 경우에만 조기 방출이 발생한다.
 
 use anyhow::Result;
 use log_parser::config::TransportConfig;
@@ -159,7 +160,7 @@ async fn main() -> Result<()> {
     let base_ts = chrono::Utc::now();
     let mut window = DedupWindow::new(window_seconds, lru_cap);
     // 시간 만료로 방출된 이벤트 '수'만 센다(누적 저장 X — 고카디널리티에서 도구 메모리 폭발 방지).
-    // LRU 폐기분은 window.total_evictions()로 따로 읽는다.
+    // LRU 조기방출분은 window.total_evictions()로 따로 읽는다(실제 이벤트는 flush_all에 포함).
     let mut emitted_expired: u64 = 0;
 
     let mut in_lines: u64 = 0;
@@ -189,9 +190,9 @@ async fn main() -> Result<()> {
         }
     }
     let parse_elapsed = t0.elapsed();
-    let lru_drops = window.total_evictions(); // lru_cap 초과로 폐기된 고유 패턴 수
+    let lru_early = window.total_evictions(); // lru_cap 초과로 조기 방출된 고유 패턴 수
     let flushed = window.flush_all();
-    let cycle_events = flushed.len() as u64; // 현재 창 보유 = 1사이클 envelope(≤ lru_cap)
+    let cycle_events = flushed.len() as u64; // 창 보유 + LRU 조기방출분 = 1사이클 envelope
     let rss = peak_rss_kb();
 
     // ── envelope 조립: 한 사이클 분량(flush_all)만 = 실제 송출 단위(≤ lru_cap) ──
@@ -229,7 +230,8 @@ async fn main() -> Result<()> {
 
     // ── 리포트 ──
     let secs = parse_elapsed.as_secs_f64();
-    let distinct_total = emitted_expired + cycle_events + lru_drops;
+    // LRU 조기방출분은 flush_all 결과(cycle_events)에 이미 포함되므로 따로 더하지 않는다(이중 계산 방지).
+    let distinct_total = emitted_expired + cycle_events;
     let ratio = if distinct_total > 0 { in_lines as f64 / distinct_total as f64 } else { 0.0 };
     println!("\n===== loadtest 결과 =====");
     println!(
@@ -249,14 +251,15 @@ async fn main() -> Result<()> {
         }
     );
     println!(
-        "dedup : {} lines → ~{} 고유 (만료방출 {} + 창보유 {} + LRU폐기 {}) · {:.0}:1",
-        in_lines, distinct_total, emitted_expired, cycle_events, lru_drops, ratio
+        "dedup : {} lines → ~{} 고유 (만료방출 {} + 창방출 {} [LRU조기방출 {} 포함]) · {:.0}:1",
+        in_lines, distinct_total, emitted_expired, cycle_events, lru_early, ratio
     );
-    if lru_drops > 0 {
+    if lru_early > 0 {
         println!(
-            "  ⚠ LRU폐기 {} — 카디널리티가 lru_cap({})/window({}s) 상한 초과 → 오래된 고유패턴 폐기(메모리 상한 유지). \
+            "  ⚠ LRU조기방출 {} — 카디널리티가 lru_cap({})/window({}s) 상한 초과 → 오래된 고유패턴을 \
+             폐기 대신 다음 flush로 조기 방출(유실 0·메모리 상한 유지). \
              실운영 30s 창에선 '30초당' 고유패턴이 lru_cap 넘을 때만 발생.",
-            lru_drops, lru_cap, window_seconds
+            lru_early, lru_cap, window_seconds
         );
     }
     println!(
