@@ -2,6 +2,32 @@
 
 > 최신 항목을 위에 추가한다. (루트 [README](README.md) 요약, 상세 설계는 [docs/](docs/README.md))
 
+## 2026-07-27 — 장애 경로 내구성·폭주 방지·분류 정확성 (#23 #24)
+
+5축 품질 감사(아키텍처·신뢰성·정규화·API·테스트)에서 확인된 장애 경로 결함 일괄 수정.
+평상시 경로(수집→분류→dedup→전송)는 불변 — 전부 "뭔가 잘못됐을 때"의 동작 수정.
+
+**유실 방지 (#23, 패키지 A)**
+
+- **종료 시 flush**: SIGTERM/SIGINT에 진행 중 cycle을 spool `new/`에 저장 후 종료(다음 기동 replay가 재전송). 기존엔 재시작·배포마다 최대 30분치 확정 유실.
+- **WAL 원자적 쓰기**: temp 파일 + fsync + rename + 부모 dir fsync — 잘린 `.json` 존재 불가. 파싱 불가 파일은 `corrupt/` 격리(기존: `new/` 영구 잔류·매 기동 실패 반복).
+- **디스크풀 무음 드롭 수정**: spool 저장 실패 envelope이 전송도 실패하면 조용히 버려지던 것 → `retry/` 재저장 시도, 최종 실패만 `error` 로그. `persist_seq`를 저장 성공 뒤로 이동.
+- **spool 상한 상향**: `new/` 512→**2048MB**, `retry/` 256→**1024MB**, TTL 72→**168h**.
+
+**폭주 방지 (#23, 패키지 B)**
+
+- **critical 재시도 유한화**: 무한 재시도 → 2×`retry_max_normal` 후 `retry/` 파킹. 수신측 장기 다운 시 전송 태스크·압축 body 무한 누적 → 128MB cgroup 내 OOM 경로 제거.
+- **라이브 전송 동시성 4 제한**(기동 replay와 동일 세마포어).
+- **`/raw` since/until 오버플로 패닉 수정**: chrono `try_*` 사용, 초과 입력은 기본 창 폴백.
+
+**분류 정확성 (#24, 패키지 C)**
+
+- **severity 커버리지**: CRITICAL에 read-only remount·MCE 추가 + **ERROR 티어 신설**(I/O error, blk_update_request, EXT4/XFS error, segfault at, GPF, hardware error, EDAC — 9종). 파일 소스(base=info)의 위험 이벤트가 info로 출하되던 구멍 보완. 승격만 있고 강등 없음, 오탐 방어 네거티브 테스트 포함.
+- **container.oom 도달 불능 수정**: first-match-wins에서 kernel.oom("Out of memory: Killed")이 cgroup OOM 라인을 선점 → container.oom 블록을 앞으로(narrow-before-broad). 호스트 OOM은 여전히 kernel.oom(회귀 테스트로 증명).
+
+검증: 브랜치별 193/202 passed → **병합 통합 213 passed, 0 failed**.
+배포: 각 서버 재빌드·재기동 필요(아래 배포 절차는 README 참조). 재기동 시점부터 graceful shutdown 적용.
+
 ## 2026-07-23 — `/raw` 원문 로그 드릴다운 엔드포인트
 
 요약(`/flush`·`/trigger-sos`, dedup)만으로 부족한 상세 대처를 위해, 최근 원문 로그를

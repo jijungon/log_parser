@@ -197,8 +197,12 @@ spool은 두 디렉터리로 구성됩니다.
 ```
 spool_dir/           (기본: /var/lib/log_parser/spool)
 ├── new/             ← 현재 전송 대기 중인 WAL 파일
-└── retry/           ← 전송 실패 후 drain 대기 중인 파일
+├── retry/           ← 전송 실패 후 drain 대기 중인 파일
+└── corrupt/         ← 파싱 불가(잘림 등) 파일 격리 (포렌식용, 자동 재전송 안 함)
 ```
+
+WAL 쓰기는 **원자적**입니다(temp 파일 → fsync → rename). 정전·크래시가 어느 시점에 나도
+잘린 `.json`은 존재할 수 없고, temp 잔여물은 기동 시 정리됩니다.
 
 **new/ 풀 동작**
 
@@ -208,7 +212,7 @@ spool_dir/           (기본: /var/lib/log_parser/spool)
 
 `retry/`에 쌓인 파일은 자동 재전송되지 않습니다. 수신측 서버가 `POST :9100/drain-spool`을 호출해 시간 창을 지정하면 해당 창의 파일을 재전송합니다. 파일명은 ULID이므로 생성 시각 기준 필터링이 가능합니다.
 
-> **⚠ retry/ 상한·TTL** — `retry/`는 무한정 쌓이지 않는다. `transport.retry_max_mb`(기본 256MB)·`transport.retry_ttl_hours`(기본 72h)를 넘으면 **오래된 미배달 파일부터 자동 삭제**된다(수신측 장기 다운 시 호스트 디스크 보호). 즉 drain 없이 방치하면 TTL·용량 초과분은 유실될 수 있으므로, 장기 미배달이 예상되면 그 전에 `drain-spool`로 회수해야 한다. (0으로 설정하면 각각 무제한)
+> **⚠ retry/ 상한·TTL** — `retry/`는 무한정 쌓이지 않는다. `transport.retry_max_mb`(기본 1024MB)·`transport.retry_ttl_hours`(기본 168h=7일)를 넘으면 **오래된 미배달 파일부터 자동 삭제**된다(수신측 장기 다운 시 호스트 디스크 보호). 즉 drain 없이 방치하면 TTL·용량 초과분은 유실될 수 있으므로, 장기 미배달이 예상되면 그 전에 `drain-spool`로 회수해야 한다. (0으로 설정하면 각각 무제한)
 
 ---
 
@@ -289,11 +293,28 @@ Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마
 | 상황                         | 에이전트 동작                                                                                              |
 | -------------------------- | ---------------------------------------------------------------------------------------------------- |
 | 수신측 5xx / 네트워크 오류          | 재시도 (5s → 10s → 20s … 최대 300s 간격, `retry_base_seconds` 설정)                                           |
-| `critical` 이벤트 포함 envelope | 무한 재시도 (포기 없음)                                                                                       |
+| `critical` 이벤트 포함 envelope | 일반의 **2배 한도**(기본 10회) 재시도 후 `retry/`에 보관 — 디스크에 이미 안전, drain API 또는 재기동 replay로 재전송               |
 | 일반 envelope                | 기본 **5회 재시도** 후 포기 (`transport.retry_max_normal` 설정, 초기 전송 포함 최대 6회) — `retry/`로 이동 (drain API로 재전송) |
 | 수신측 4xx                    | 즉시 포기, spool 파일 `retry/`로 이동 (drain API로 재전송)                                                        |
 
-`new/` spool 용량 초과 시 가장 오래된 파일을 `retry/`로 이동한 뒤 새 envelope을 저장합니다. 수신측 다운이 길어질 것으로 예상되면 `transport.spool_max_mb`를 늘리세요.
+동시 전송 태스크는 **최대 4개**(기동 replay와 동일 상한)로 제한됩니다 — 수신측 장기 다운 중에도
+전송 태스크·압축 body가 무한 누적되지 않아 파서 자신(128MB cgroup)이 죽지 않습니다.
+
+`new/` spool 용량 초과 시 가장 오래된 파일을 `retry/`로 이동한 뒤 새 envelope을 저장합니다(기본 2048MB, `transport.spool_max_mb`). 수신측 다운이 길어질 것으로 예상되면 상한을 늘리세요.
+
+---
+
+## 장애 상황 동작 보장 (무손실 설계)
+
+"뭔가 잘못됐을 때" 로그가 어떻게 되는지에 대한 보장. 평상시 경로는 [전체 흐름](#전체-흐름) 참조.
+
+| 상황 | 파서의 동작 |
+| --- | --- |
+| **재시작·배포 (SIGTERM/SIGINT)** | 진행 중 cycle을 dedup flush → finalize → `new/`에 저장 후 종료. 다음 기동 시 자동 재전송 — **유실 0** |
+| **정전·크래시** | WAL 원자적 쓰기(temp→fsync→rename)라 **잘린 파일은 존재 불가**. 파싱 불가 파일은 `corrupt/`로 격리(무한 재시도 방지) |
+| **수신측 장기 다운** | 재시도 상한 후 `retry/`에 보관(디스크), 동시 전송 4개 제한 — 파서는 계속 수집하며 **스스로 죽지 않음** |
+| **디스크 풀 (spool 저장 실패)** | 전송 실패 시 in-memory 바이트를 `retry/`에 재저장 시도, 최종 실패 시에만 `error` 로그로 크게 알림 — **무음 유실 없음** |
+| **파일 소스의 위험 이벤트** | severity 2티어 승격: 읽기전용 remount·MCE → `critical`, 디스크 I/O·segfault 등 → `error` (base=info여도 놓치지 않음) |
 
 ---
 
