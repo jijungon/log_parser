@@ -45,15 +45,17 @@ pub struct RawParams {
 }
 
 /// "30s" / "15m" / "2h" / "1d" → Duration. 잘못된 형식이면 None.
+/// try_*: chrono Duration 범위 초과 시 panic 대신 None — 호출부가 기본 창으로 폴백.
+/// (Duration::days 등은 out-of-range i64에서 panic → 핸들러 태스크가 죽는 문제 방지)
 fn parse_since(s: &str) -> Option<Duration> {
     let s = s.trim();
     let split = s.find(|c: char| !c.is_ascii_digit())?;
     let n: i64 = s[..split].parse().ok()?;
     match &s[split..] {
-        "s" => Some(Duration::seconds(n)),
-        "m" => Some(Duration::minutes(n)),
-        "h" => Some(Duration::hours(n)),
-        "d" => Some(Duration::days(n)),
+        "s" => Duration::try_seconds(n),
+        "m" => Duration::try_minutes(n),
+        "h" => Duration::try_hours(n),
+        "d" => Duration::try_days(n),
         _ => None,
     }
 }
@@ -350,6 +352,50 @@ mod tests {
         assert_eq!(parse_since("1d"), Some(Duration::days(1)));
         assert_eq!(parse_since("bogus"), None);
         assert_eq!(parse_since("100"), None); // 단위 없음
+    }
+
+    #[test]
+    fn parse_since_overflow_returns_none() {
+        // chrono Duration 범위 초과 — 기존 Duration::days(n)은 여기서 panic했음
+        assert_eq!(parse_since("99999999999999999d"), None);
+        assert_eq!(parse_since("99999999999999999h"), None);
+        assert_eq!(parse_since("99999999999999999m"), None);
+        assert_eq!(parse_since("99999999999999999s"), None);
+    }
+
+    #[tokio::test]
+    async fn overflow_since_falls_back_to_default_window() {
+        // since 오버플로 → panic 없이 기본 창(1h)으로 200 응답
+        let resp = app(make_state("", 600))
+            .oneshot(
+                Request::get("/raw?sources=syslog&since=99999999999999999d")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // x-raw-window 헤더로 기본 1h 창 폴백 검증
+        let window = resp.headers().get("x-raw-window").unwrap().to_str().unwrap().to_string();
+        let (from, to) = window.split_once('/').unwrap();
+        let from = chrono::DateTime::parse_from_rfc3339(from).unwrap();
+        let to = chrono::DateTime::parse_from_rfc3339(to).unwrap();
+        assert_eq!((to - from).num_hours(), 1, "오버플로 since는 기본 1h 창으로 폴백");
+    }
+
+    #[tokio::test]
+    async fn overflow_until_is_ignored() {
+        // until 오버플로 → 무시(상한 없음 = now까지), panic 없이 200
+        let resp = app(make_state("", 600))
+            .oneshot(
+                Request::get("/raw?sources=syslog&since=2h&until=99999999999999999h")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
