@@ -40,6 +40,7 @@ pub async fn run_pipeline(
     seq_state_path: String,
     spool: Arc<Spool>,
     transport: Arc<HttpJsonTransport>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let t = transport;
     let agent_start = SystemTime::now();
@@ -91,6 +92,44 @@ pub async fn run_pipeline(
         tokio::select! {
             biased;
 
+            // 종료 신호 → 채널 잔여 이벤트 흡수 → dedup flush → finalize → spool 저장.
+            // 네트워크 전송은 하지 않는다 — 다음 기동 시 startup replay가 배달한다.
+            // (기존에는 SIGTERM 시 runtime이 태스크를 그냥 drop해 최대 30분치 유실)
+            _ = shutdown_rx.changed() => {
+                info!("종료 신호 수신 — 진행 중 cycle을 spool에 저장 후 종료");
+                while let Ok(ev) = rx.try_recv() {
+                    ingest_event(&mut dedup, &mut cycle, &categories, ev);
+                }
+                for ev in dedup.flush_all() { cycle.push(ev); }
+
+                let restarts = vector_handle.restarts_24h.load(Ordering::Relaxed);
+                let uptime   = uptime_secs(&agent_start);
+                let (envelope, next_seq) = cycle.finalize(restarts, uptime);
+
+                if envelope.body.is_empty() {
+                    info!("종료 flush — 빈 cycle, spool 저장 생략");
+                    return Ok(());
+                }
+                match serde_json::to_vec(&envelope) {
+                    Ok(bytes) => {
+                        let sp = Arc::clone(&spool);
+                        let saved = tokio::task::spawn_blocking(move || sp.save_bytes(&bytes))
+                            .await
+                            .unwrap_or_else(|e| Err(anyhow::anyhow!("spool spawn_blocking 패닉: {e}")));
+                        match saved {
+                            Ok(path) => {
+                                persist_seq(&seq_state_path, next_seq).await;
+                                info!(seq = envelope.cycle.seq, path = %path.display(),
+                                    "종료 flush — envelope spool 저장 완료 (다음 기동 시 재전송)");
+                            }
+                            Err(e) => error!("종료 flush — spool 저장 실패, 이번 cycle 유실: {e}"),
+                        }
+                    }
+                    Err(e) => error!("종료 flush — 직렬화 실패, 이번 cycle 유실: {e}"),
+                }
+                return Ok(());
+            }
+
             // 이벤트 수신 → normalize → dedup (None = 채널 종료 → 루프 탈출)
             ev = rx.recv() => {
                 let ev = match ev {
@@ -101,23 +140,7 @@ pub async fn run_pipeline(
                         return Ok(());
                     }
                 };
-                let raw = ev.raw_message().to_string();
-                if raw.is_empty() { continue; }
-
-                // Vector가 준 구조화 필드 보강 (메시지에서 추출된 값이 우선, 여긴 빈 자리만)
-                let mut extra: Vec<(&str, String)> = Vec::new();
-                if let Some(pid) = &ev.pid { extra.push(("pid", pid.clone())); }
-                if let Some(unit) = &ev.unit { extra.push(("unit", unit.clone())); }
-                if let Some(priority) = &ev.priority { extra.push(("priority", priority.clone())); }
-                if let Some(fpath) = &ev.file_path { extra.push(("file_path", fpath.clone())); }
-                if !ev.host.is_empty() { extra.push(("source_host", ev.host.clone())); }
-
-                if let Some(emitted) = crate::process::process_line(
-                    &mut dedup, &categories, &raw, &ev.log_parser_source,
-                    &ev.log_parser_severity, ev.timestamp, &extra,
-                ) {
-                    cycle.push(emitted);
-                }
+                ingest_event(&mut dedup, &mut cycle, &categories, ev);
             }
 
             // flush 요청 → cycle 즉시 finalize → oneshot 응답 (transport 미사용)
@@ -220,6 +243,33 @@ pub async fn run_pipeline(
 }
 
 // ── 유틸리티 ──────────────────────────────────────────────────────────────────
+
+/// 수신 이벤트 한 건을 normalize → dedup → cycle에 반영.
+/// (수신 루프와 종료 flush의 채널 잔여 흡수가 공유하는 경로)
+fn ingest_event(
+    dedup: &mut DedupWindow,
+    cycle: &mut cycle::CycleState,
+    categories: &CategoryMatcher,
+    ev: RawLogEvent,
+) {
+    let raw = ev.raw_message().to_string();
+    if raw.is_empty() { return; }
+
+    // Vector가 준 구조화 필드 보강 (메시지에서 추출된 값이 우선, 여긴 빈 자리만)
+    let mut extra: Vec<(&str, String)> = Vec::new();
+    if let Some(pid) = &ev.pid { extra.push(("pid", pid.clone())); }
+    if let Some(unit) = &ev.unit { extra.push(("unit", unit.clone())); }
+    if let Some(priority) = &ev.priority { extra.push(("priority", priority.clone())); }
+    if let Some(fpath) = &ev.file_path { extra.push(("file_path", fpath.clone())); }
+    if !ev.host.is_empty() { extra.push(("source_host", ev.host.clone())); }
+
+    if let Some(emitted) = crate::process::process_line(
+        dedup, categories, &raw, &ev.log_parser_source,
+        &ev.log_parser_severity, ev.timestamp, &extra,
+    ) {
+        cycle.push(emitted);
+    }
+}
 
 async fn persist_seq(path: &str, seq: u64) {
     if !path.is_empty() {
@@ -488,6 +538,108 @@ mod tests {
             .join("retry").join(path.file_name().unwrap());
         assert!(retry_path.exists(), "file should be in retry/ after RateLimited exhaustion");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    fn test_raw_event(msg: &str) -> RawLogEvent {
+        RawLogEvent {
+            log_parser_severity: "info".to_string(),
+            log_parser_source: "journald".to_string(),
+            timestamp: chrono::Utc::now(),
+            host: "test-host".to_string(),
+            message: Some(msg.to_string()),
+            priority: None,
+            unit: None,
+            pid: None,
+            file_message: None,
+            file_path: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_flushes_cycle_to_spool() {
+        use crate::config::{CycleConfig, DedupConfig, PipelineConfig, TransportConfig};
+
+        let dir = unique_temp_dir("shutdown_flush");
+        let spool = Arc::new(Spool::new(dir.to_str().unwrap(), 10).unwrap());
+        // 전송 불가 주소 — 종료 flush는 네트워크를 쓰지 않아야 하므로 도달 자체가 없어야 함
+        let transport = make_transport("http://127.0.0.1:1/ingest");
+        let (event_tx, event_rx) = mpsc::channel(100);
+        let (_flush_tx, flush_rx) = mpsc::channel::<FlushSignal>(4);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let vector_handle = Arc::new(VectorHandle::new(
+            PipelineConfig::default(), String::new(), String::new(),
+        ));
+
+        let handle = tokio::spawn(run_pipeline(
+            event_rx,
+            flush_rx,
+            DedupConfig::default(),
+            CycleConfig::default(),
+            TransportConfig::default(),
+            CategoryMatcher::fallback(),
+            "test-host".to_string(),
+            "hid".to_string(),
+            "bid".to_string(),
+            vector_handle,
+            0, // max_events 무제한
+            0, // body size guard 없음
+            7, // initial_seq
+            String::new(),
+            Arc::clone(&spool),
+            transport,
+            shutdown_rx,
+        ));
+
+        // 서로 다른 3줄 주입 → dedup 후 3개 이벤트
+        for i in 0..3 {
+            event_tx
+                .send(test_raw_event(&format!("unique shutdown event line {i}")))
+                .await
+                .unwrap();
+        }
+        shutdown_tx.send(true).unwrap();
+        handle.await.unwrap().unwrap();
+
+        // 종료 flush envelope이 spool new/에 저장 — seq·이벤트 수 검증
+        let pending = spool.pending();
+        assert_eq!(pending.len(), 1, "종료 flush envelope이 new/에 저장되어야 함");
+        let env = spool.load(&pending[0]).unwrap();
+        assert_eq!(env.cycle.seq, Some(7), "진행 중이던 cycle의 seq 유지");
+        let total: u64 = env.headers.counts.as_ref()
+            .map(|c| c.by_severity.critical + c.by_severity.error + c.by_severity.warn + c.by_severity.info)
+            .unwrap_or(0);
+        assert_eq!(total, 3, "주입한 3개 이벤트가 모두 envelope에 포함되어야 함");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_with_empty_cycle_saves_nothing() {
+        use crate::config::{CycleConfig, DedupConfig, PipelineConfig, TransportConfig};
+
+        let dir = unique_temp_dir("shutdown_empty");
+        let spool = Arc::new(Spool::new(dir.to_str().unwrap(), 10).unwrap());
+        let transport = make_transport("http://127.0.0.1:1/ingest");
+        let (_event_tx, event_rx) = mpsc::channel(4);
+        let (_flush_tx, flush_rx) = mpsc::channel::<FlushSignal>(4);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let vector_handle = Arc::new(VectorHandle::new(
+            PipelineConfig::default(), String::new(), String::new(),
+        ));
+
+        let handle = tokio::spawn(run_pipeline(
+            event_rx, flush_rx,
+            DedupConfig::default(), CycleConfig::default(), TransportConfig::default(),
+            CategoryMatcher::fallback(),
+            "test-host".to_string(), "hid".to_string(), "bid".to_string(),
+            vector_handle, 0, 0, 1, String::new(),
+            Arc::clone(&spool), transport, shutdown_rx,
+        ));
+
+        shutdown_tx.send(true).unwrap();
+        handle.await.unwrap().unwrap();
+
+        assert!(spool.pending().is_empty(), "빈 cycle은 spool 저장을 생략해야 함");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
