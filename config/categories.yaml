@@ -15,6 +15,16 @@
 #   - 실서버(file.auth)에서 미분류되던 sshd 세션·로그인 패턴 추가
 
 categories:
+  # ── 컨테이너 OOM ──────────────────────────────────────────────────────────
+  # kernel.oom("Out of memory: Killed")보다 반드시 먼저 와야 한다 (first-match-wins).
+  # 실제 cgroup OOM 라인 "Memory cgroup out of memory: Killed process ..." 은
+  # 두 문구를 모두 포함하므로 좁은 패턴을 위에 둔다 (narrow-before-broad).
+  - pattern: "Memory cgroup out of memory"
+    category: container.oom
+
+  - pattern: "oom-kill-container"
+    category: container.oom
+
   # ── 커널 ─────────────────────────────────────────────────────────────────
   - pattern: "Out of memory: Killed"
     category: kernel.oom
@@ -161,13 +171,6 @@ categories:
 
   - pattern: "time stepped"
     category: ntp.drift
-
-  # ── 컨테이너 OOM ──────────────────────────────────────────────────────────
-  - pattern: "Memory cgroup out of memory"
-    category: container.oom
-
-  - pattern: "oom-kill-container"
-    category: container.oom
 
   # ── 디스크 링크 에러 ──────────────────────────────────────────────────────
   - pattern: "hard resetting link"

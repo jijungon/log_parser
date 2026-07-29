@@ -326,6 +326,23 @@ categories:
         assert_eq!(m.categorize("nothing here"), "system.general");
     }
 
+    /// cgroup OOM 라인은 kernel.oom 문구("Out of memory: Killed")도 포함하므로
+    /// container.oom 규칙이 yaml 에서 반드시 먼저 와야 한다 (narrow-before-broad).
+    #[test]
+    fn container_oom_precedes_kernel_oom() {
+        let yaml = include_str!("../../config/categories.yaml");
+        let m = CategoryMatcher::build(yaml).expect("실제 categories.yaml 파싱/컴파일");
+        assert_eq!(
+            m.categorize("May  8 10:13:40 host kernel: Memory cgroup out of memory: Killed process 2481 (java)"),
+            "container.oom"
+        );
+        // 호스트 전역 OOM(cgroup 문구 없음)은 여전히 kernel.oom
+        assert_eq!(
+            m.categorize("May  8 10:13:42 host kernel: Out of memory: Killed process 1234 (mysqld)"),
+            "kernel.oom"
+        );
+    }
+
     /// 실제 config/categories.yaml 로 (실로그 → 기대 카테고리) 회귀 검증.
     #[test]
     fn regression_against_real_categories_yaml() {
@@ -343,6 +360,8 @@ categories:
             ("Jun 15 01:41:12 host systemd[1]: session-8888.scope: Deactivated successfully.", "session.activity"),
             ("Jun 11 03:25:41 host systemd-logind[657]: Session 8103 logged out. Waiting for processes to exit.", "session.activity"),
             ("May  8 10:13:42 db-prod-03 kernel: Out of memory: Killed process 2481 (java)", "kernel.oom"),
+            ("May  8 10:13:42 db-prod-03 kernel: Out of memory: Killed process 1234 (mysqld)", "kernel.oom"),
+            ("May  8 10:13:40 db-prod-03 kernel: Memory cgroup out of memory: Killed process 2481 (java)", "container.oom"),
             ("May  8 08:41:05 db-prod-03 kernel: blk_update_request: I/O error, dev sdb, sector 4096000", "disk.io_error"),
             ("May  8 08:41:10 db-prod-03 kernel: EXT4-fs error (device sdb1): ext4_find_entry:1455", "fs.error"),
             ("May  8 10:14:03 db-prod-03 systemd[1]: app-worker.service: Start request repeated too quickly", "systemd.restart_loop"),
