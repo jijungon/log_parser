@@ -20,6 +20,9 @@ pub struct DedupWindow {
     cache: LruCache<u64, DedupState>,
     window_secs: i64,
     total_evictions: u64,
+    // LRU cap 초과로 축출된 그룹을 폐기하지 않고 보관 → 다음 flush_expired/flush_all에서 방출.
+    // 크기는 5초 dedup_tick 사이의 축출량으로 자연히 유계(매 tick마다 비워짐) — 별도 상한 불필요.
+    evicted_pending: Vec<DedupEvent>,
 }
 
 impl DedupWindow {
@@ -28,6 +31,7 @@ impl DedupWindow {
             cache: LruCache::new(NonZeroUsize::new(lru_cap).expect("lru_cap > 0")),
             window_secs: window_seconds as i64,
             total_evictions: 0,
+            evicted_pending: Vec::new(),
         }
     }
 
@@ -97,14 +101,14 @@ impl DedupWindow {
             return Some(emitted);
         }
 
-        // LRU eviction 추적
+        // LRU eviction 추적 (축출분은 폐기되지 않고 insert_new에서 조기 방출 버퍼로 이동)
         if self.cache.len() == self.cache.cap().get() {
             self.total_evictions += 1;
             if self.total_evictions % 100 == 1 {
                 warn!(
                     total = self.total_evictions,
                     cap = self.cache.cap().get(),
-                    "LRU evict 발생"
+                    "LRU cap 도달 — 오래된 그룹을 조기 방출(다음 flush에 포함, 유실 없음)"
                 );
             }
         }
@@ -113,13 +117,14 @@ impl DedupWindow {
         None
     }
 
-    /// 지금까지 발생한 LRU 방출 총수 = lru_cap 초과로 **폐기된** 고유 패턴 수.
+    /// 지금까지 발생한 LRU 축출 총수 = lru_cap 초과로 **조기 방출된** 고유 패턴 수
+    /// (폐기 아님 — 누적 count/샘플은 다음 flush에서 그대로 방출됨).
     /// 평상시 0(창 회전으로 cap 도달 전에 flush됨). >0이면 카디널리티가 cap을 압박한다는 신호.
     pub fn total_evictions(&self) -> u64 {
         self.total_evictions
     }
 
-    /// 윈도우가 만료된 항목을 모두 방출
+    /// 윈도우가 만료된 항목을 모두 방출 (+ LRU 축출로 조기 방출 대기 중이던 그룹 포함)
     pub fn flush_expired(&mut self) -> Vec<DedupEvent> {
         let now = Utc::now();
         let window = self.window_secs;
@@ -130,18 +135,24 @@ impl DedupWindow {
             .map(|(k, _)| *k)
             .collect();
 
-        expired
-            .into_iter()
-            .filter_map(|k| self.cache.pop(&k).map(|v| to_event(k, v)))
-            .collect()
+        let mut out = std::mem::take(&mut self.evicted_pending);
+        out.extend(
+            expired
+                .into_iter()
+                .filter_map(|k| self.cache.pop(&k).map(|v| to_event(k, v))),
+        );
+        out
     }
 
-    /// cycle 종료 시 모든 항목 방출
+    /// cycle 종료 시 모든 항목 방출 (+ LRU 축출로 조기 방출 대기 중이던 그룹 포함)
     pub fn flush_all(&mut self) -> Vec<DedupEvent> {
         let keys: Vec<u64> = self.cache.iter().map(|(k, _)| *k).collect();
-        keys.into_iter()
-            .filter_map(|k| self.cache.pop(&k).map(|v| to_event(k, v)))
-            .collect()
+        let mut out = std::mem::take(&mut self.evicted_pending);
+        out.extend(
+            keys.into_iter()
+                .filter_map(|k| self.cache.pop(&k).map(|v| to_event(k, v))),
+        );
+        out
     }
 
     fn insert_new(
@@ -155,7 +166,11 @@ impl DedupWindow {
         ts: DateTime<Utc>,
         fields: std::collections::HashMap<String, serde_json::Value>,
     ) {
-        self.cache.push(
+        // insert_new는 항상 "키 부재" 상태에서만 불리므로(push의 두 경로 모두),
+        // LruCache::push의 반환값은 언제나 cap 초과로 축출된 **다른 키**의 LRU 항목이다.
+        // 폐기하는 대신 flush와 동일한 변환(to_event)으로 DedupEvent를 만들어 버퍼에 보관
+        // → 다음 flush_expired/flush_all(코디네이터 5초 dedup_tick)에서 방출 → 유실 0.
+        if let Some((evicted_key, evicted_state)) = self.cache.push(
             fingerprint,
             DedupState {
                 count: 1,
@@ -168,7 +183,10 @@ impl DedupWindow {
                 template,
                 fields,
             },
-        );
+        ) {
+            debug_assert_ne!(evicted_key, fingerprint, "insert_new는 키 부재 시에만 호출");
+            self.evicted_pending.push(to_event(evicted_key, evicted_state));
+        }
     }
 }
 
@@ -230,6 +248,49 @@ mod tests {
         }
         let events = w.flush_all();
         assert!(events[0].sample_raws.len() <= 3);
+    }
+
+    #[test]
+    fn lru_eviction_emits_instead_of_discarding() {
+        let mut w = DedupWindow::new(30, 3); // 작은 cap으로 축출 유도
+        // fp=1에 5건 누적 → LRU 최후순위가 되도록 먼저 넣음
+        for _ in 0..5 {
+            push_simple(&mut w, 1, "error");
+        }
+        push_simple(&mut w, 2, "info");
+        push_simple(&mut w, 3, "info");
+        // cap(3) 가득 → fp=4 삽입이 LRU(fp=1)를 축출
+        push_simple(&mut w, 4, "info");
+        assert_eq!(w.total_evictions(), 1, "축출 카운터는 계속 증가해야 함");
+
+        let events = w.flush_all();
+        // 축출분(fp=1) + 창 보유분(fp=2,3,4) = 4건 — 유실 0
+        assert_eq!(events.len(), 4);
+        // 들어간 총 count(5+1+1+1=8) == 나온 총 count
+        let total: u64 = events.iter().map(|e| e.count).sum();
+        assert_eq!(total, 8, "in == out, 누적 count 유실 없음");
+        // 축출된 그룹이 누적 count 5를 그대로 갖고 방출됐는지
+        let evicted = events
+            .iter()
+            .find(|e| e.fingerprint == format!("{:016x}", 1u64))
+            .expect("축출된 fp=1 그룹이 방출돼야 함");
+        assert_eq!(evicted.count, 5);
+    }
+
+    #[test]
+    fn evicted_pending_drains_via_flush_expired() {
+        let mut w = DedupWindow::new(30, 2);
+        push_simple(&mut w, 1, "info");
+        push_simple(&mut w, 2, "info");
+        push_simple(&mut w, 3, "info"); // fp=1 축출
+        // 창은 아직 만료 전(30s) — flush_expired는 축출 보류분만 방출
+        let events = w.flush_expired();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].fingerprint, format!("{:016x}", 1u64));
+        // 이중 방출 금지: 버퍼는 한 번만 비워짐
+        assert!(w.flush_expired().is_empty());
+        // 창 보유분(fp=2,3)은 그대로
+        assert_eq!(w.flush_all().len(), 2);
     }
 
     #[test]
