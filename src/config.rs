@@ -277,10 +277,10 @@ fn default_request_timeout() -> u64 { 30 }
 fn default_retry_max_normal() -> u32 { 5 }
 fn default_retry_base() -> u64 { 5 }
 fn default_retry_max() -> u64 { 300 }
-fn default_spool_max_mb() -> u64 { 512 }
+fn default_spool_max_mb() -> u64 { 2048 }
 fn default_spool_dir() -> String { "/var/lib/log_parser/spool".into() }
-fn default_retry_max_mb() -> u64 { 256 }
-fn default_retry_ttl_hours() -> u64 { 72 }
+fn default_retry_max_mb() -> u64 { 1024 }
+fn default_retry_ttl_hours() -> u64 { 168 }
 fn default_gzip_level() -> u32 { 6 }
 fn default_listen_addr() -> String { "127.0.0.1:9100".into() }
 fn default_flush_token_env() -> String { "FLUSH_INBOUND_TOKEN".into() }
@@ -309,7 +309,9 @@ mod tests {
         assert_eq!(cfg.cycle.window_seconds, 1800);
         assert_eq!(cfg.dedup.window_seconds, 30);
         assert_eq!(cfg.dedup.lru_cap, 50000);
-        assert_eq!(cfg.transport.spool_max_mb, 512);
+        assert_eq!(cfg.transport.spool_max_mb, 2048);
+        assert_eq!(cfg.transport.retry_max_mb, 1024);
+        assert_eq!(cfg.transport.retry_ttl_hours, 168);
         assert_eq!(cfg.inbound.rate_limit_per_hour, 6);
         assert_eq!(cfg.inbound.body_size_limit_bytes, 1024);
         assert_eq!(cfg.inbound.envelope_size_limit_mb, 10);

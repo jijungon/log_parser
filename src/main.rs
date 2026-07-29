@@ -236,7 +236,11 @@ async fn main() -> Result<()> {
         (1, String::new())
     };
 
-    let pipeline_task = {
+    // graceful shutdown 신호 — SIGTERM/SIGINT 시 coordinator가 진행 중 cycle을
+    // spool에 저장하고 종료할 수 있게 한다 (전송은 다음 기동 replay가 담당).
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let mut pipeline_task = {
         let dedup_cfg = cfg.dedup.clone();
         let cycle_cfg = cfg.cycle.clone();
         let transport_cfg = cfg.transport.clone();
@@ -266,6 +270,7 @@ async fn main() -> Result<()> {
                 seq_state_path,
                 spool_for_pipeline,
                 transport_for_pipeline,
+                shutdown_rx,
             )
             .await
         })
@@ -383,7 +388,7 @@ async fn main() -> Result<()> {
                 Err(e)     => { tracing::error!("Socket receiver panic: {e}"); std::process::exit(1); }
             }
         }
-        result = pipeline_task => {
+        result = &mut pipeline_task => {
             match result {
                 Ok(Ok(())) => info!("Pipeline 종료"),
                 Ok(Err(e)) => { tracing::error!("Pipeline 오류: {e}"); std::process::exit(1); }
@@ -398,12 +403,29 @@ async fn main() -> Result<()> {
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            info!("SIGINT 수신 — 종료");
+            info!("SIGINT 수신 — graceful 종료 (진행 중 cycle spool 저장)");
+            shutdown_pipeline(&shutdown_tx, &mut pipeline_task).await;
         }
         _ = sigterm.recv() => {
-            info!("SIGTERM 수신 — graceful 종료");
+            info!("SIGTERM 수신 — graceful 종료 (진행 중 cycle spool 저장)");
+            shutdown_pipeline(&shutdown_tx, &mut pipeline_task).await;
         }
     }
 
     Ok(())
+}
+
+/// 종료 신호를 coordinator에 전달하고, 진행 중 cycle의 spool 저장 완료를
+/// 최대 10초까지 기다린다 (systemd TimeoutStopSec 안쪽에서 끝나도록 상한 고정).
+async fn shutdown_pipeline(
+    shutdown_tx: &tokio::sync::watch::Sender<bool>,
+    pipeline_task: &mut tokio::task::JoinHandle<Result<()>>,
+) {
+    let _ = shutdown_tx.send(true);
+    match tokio::time::timeout(std::time::Duration::from_secs(10), pipeline_task).await {
+        Ok(Ok(Ok(()))) => info!("pipeline graceful 종료 완료"),
+        Ok(Ok(Err(e))) => tracing::error!("pipeline 종료 중 오류: {e}"),
+        Ok(Err(e))     => tracing::error!("pipeline 종료 중 panic: {e}"),
+        Err(_)         => tracing::error!("pipeline 종료 대기 timeout(10s) — 강제 종료"),
+    }
 }
