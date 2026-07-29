@@ -176,7 +176,6 @@ pub async fn run_pipeline(
 
                 info!(seq = envelope.cycle.seq, sections = envelope.headers.total_sections,
                     "cycle envelope 조립 → transport 전송");
-                persist_seq(&seq_state_path, next_seq).await;
 
                 // 한 번만 직렬화 — size guard + spool WAL 모두 재사용
                 let json_bytes = serde_json::to_vec(&envelope).ok();
@@ -214,6 +213,9 @@ pub async fn run_pipeline(
                 };
                 match spool_result {
                     Ok(path) => {
+                        // WAL 저장 성공 후에만 seq 영속화 — 저장 전 crash 시 envelope 없이
+                        // seq만 앞서 나가 "전송된 것처럼 보이는 구멍"이 생기는 것을 방지
+                        persist_seq(&seq_state_path, next_seq).await;
                         let t2  = Arc::clone(&t);
                         let sp2 = Arc::clone(&spool);
                         let retry_base = transport_cfg.retry_base_seconds;
@@ -223,7 +225,8 @@ pub async fn run_pipeline(
                         });
                     }
                     Err(e) => {
-                        // spool 공간 부족 등 — WAL 없이 백오프 재시도. commit은 no-op.
+                        // spool 공간 부족 등 — WAL 없이 백오프 재시도. 최종 실패 시
+                        // send_with_backoff가 메모리 bytes를 retry/에 직접 저장한다.
                         warn!("spool 저장 실패 ({e}) — 백오프 재시도 진행");
                         let t2  = Arc::clone(&t);
                         let sp2 = Arc::clone(&spool);
@@ -305,20 +308,31 @@ async fn send_with_backoff(
     retry_base: u64,
     retry_max: u64,
 ) {
+    let event_total = envelope.headers.counts.as_ref()
+        .map(|c| c.by_severity.critical + c.by_severity.error + c.by_severity.warn + c.by_severity.info)
+        .unwrap_or(0);
+
     // compress-once: 루프 진입 전에 1회만 직렬화+압축하고, 모든 재시도에서 재사용.
     // (기존에는 매 시도마다 재직렬화+재gzip → 장애 재시도 폭풍 시 5% CPU 예산을 태워 수집을 굶겼음)
-    let body = match serde_json::to_vec(&envelope).map_err(|e| e.to_string())
-        .and_then(|json| t.compress(&json).map_err(|e| format!("{e:?}")))
-    {
-        Ok(b) => b,
+    let json = match serde_json::to_vec(&envelope) {
+        Ok(j) => j,
         Err(e) => {
-            error!("envelope 직렬화/압축 실패 — retry/로 이동: {e}");
-            let sp = Arc::clone(&spool);
-            let p = spool_path.clone();
-            tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
+            error!(events = event_total, "envelope 직렬화 실패 — retry/로 이동: {e}");
+            park_to_retry(&spool, &spool_path, None, event_total).await;
             return;
         }
     };
+    let body = match t.compress(&json) {
+        Ok(b) => b,
+        Err(e) => {
+            error!(events = event_total, "envelope 압축 실패 — retry/로 이동: {e:?}");
+            park_to_retry(&spool, &spool_path, Some(json), event_total).await;
+            return;
+        }
+    };
+    // WAL(new/) 저장이 실패한 envelope(빈 경로)만 포기 시 retry/ 직접 저장용 원본 보존.
+    // 정상 경로에선 디스크에 이미 있으므로 메모리 절약을 위해 버린다.
+    let mut json_backup = if spool_path.as_os_str().is_empty() { Some(json) } else { None };
 
     let mut backoff = retry_base;
     let mut attempt: u64 = 0;
@@ -338,17 +352,13 @@ async fn send_with_backoff(
             }
             Err(TransportError::Fatal(msg)) => {
                 error!("치명 오류 — retry/로 이동: {msg}");
-                let sp = Arc::clone(&spool);
-                let p = spool_path.clone();
-                tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
+                park_to_retry(&spool, &spool_path, json_backup.take(), event_total).await;
                 return;
             }
             Err(TransportError::RateLimited { retry_after }) => {
                 if !has_critical && attempt >= max_retries as u64 {
                     warn!(attempts = attempt + 1, "rate-limit 한도 소진 — retry/로 이동");
-                    let sp = Arc::clone(&spool);
-                    let p = spool_path.clone();
-                    tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
+                    park_to_retry(&spool, &spool_path, json_backup.take(), event_total).await;
                     return;
                 }
                 warn!(attempt, retry_after, "rate-limit — 대기 후 재시도");
@@ -357,9 +367,7 @@ async fn send_with_backoff(
             Err(TransportError::Retryable(msg)) => {
                 if !has_critical && attempt >= max_retries as u64 {
                     warn!(attempts = attempt + 1, "재시도 한도 소진 — retry/로 이동: {msg}");
-                    let sp = Arc::clone(&spool);
-                    let p = spool_path.clone();
-                    tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
+                    park_to_retry(&spool, &spool_path, json_backup.take(), event_total).await;
                     return;
                 }
                 warn!(attempt, wait = backoff, "재시도 가능 오류: {msg}");
@@ -368,6 +376,39 @@ async fn send_with_backoff(
             }
         }
         attempt += 1;
+    }
+}
+
+/// 전송 포기 시 envelope 보존. spool 파일이 있으면 retry/로 이동.
+/// WAL 저장이 실패해 파일이 없으면(빈 경로) 메모리 bytes를 retry/에 직접 저장 —
+/// 그것마저 실패했을 때만 실제 유실이며, byte/event 수와 함께 error!로 크게 남긴다.
+/// (기존에는 빈 경로에서 move_to_retry가 조용한 no-op → warn 한 줄로 유실)
+async fn park_to_retry(
+    spool: &Arc<Spool>,
+    spool_path: &std::path::Path,
+    json_backup: Option<Vec<u8>>,
+    event_total: u64,
+) {
+    if !spool_path.as_os_str().is_empty() {
+        let sp = Arc::clone(spool);
+        let p = spool_path.to_path_buf();
+        tokio::task::spawn_blocking(move || sp.move_to_retry(&p)).await.ok();
+        return;
+    }
+    let Some(json) = json_backup else {
+        error!(events = event_total, "envelope 유실 — spool 파일 없음 + 직렬화 bytes 없음");
+        return;
+    };
+    let bytes = json.len();
+    let sp = Arc::clone(spool);
+    let saved = tokio::task::spawn_blocking(move || sp.save_bytes_to_retry(&json))
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("retry 저장 spawn_blocking 패닉: {e}")));
+    match saved {
+        Ok(path) => info!(path = %path.display(), bytes,
+            "WAL 없던 envelope을 retry/에 직접 저장 (디스크 복구 확인)"),
+        Err(e) => error!(bytes, events = event_total,
+            "envelope 유실 — retry/ 직접 저장도 실패: {e}"),
     }
 }
 
@@ -521,6 +562,29 @@ mod tests {
         ).await;
         assert!(!path.exists(), "critical envelope must eventually succeed");
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_spool_path_parks_bytes_to_retry() {
+        // WAL(new/) 저장 실패 시나리오: 빈 spool_path + 전송 최종 실패
+        // → 메모리 bytes가 retry/에 직접 저장되어야 함 (기존: 조용한 유실)
+        let url = start_response_server(vec![500; 10]).await;
+        let dir = unique_temp_dir("empty_path_park");
+        let spool = Arc::new(Spool::new(dir.to_str().unwrap(), 10).unwrap());
+        send_with_backoff(
+            make_transport(&url), test_envelope(), PathBuf::new(),
+            2, false, Arc::clone(&spool), 5, 300,
+        ).await;
+
+        assert_eq!(spool.retry_count(), 1, "빈 경로 envelope은 retry/에 직접 저장되어야 함");
+        let files: Vec<PathBuf> = std::fs::read_dir(dir.join("retry")).unwrap()
+            .flatten().map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+            .collect();
+        assert_eq!(files.len(), 1);
+        let loaded = spool.load(&files[0]).unwrap();
+        assert_eq!(loaded.cycle.seq, Some(1), "저장된 내용이 원본 envelope과 일치해야 함");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(start_paused = true)]

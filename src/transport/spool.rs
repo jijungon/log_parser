@@ -223,6 +223,17 @@ impl Spool {
         Ok(path)
     }
 
+    /// 직렬화된 bytes를 retry/에 직접 저장 — new/ WAL 저장이 실패했던 envelope의
+    /// 마지막 방어선 (디스크 복구 후 /drain-spool 또는 수동 배달용).
+    /// atomic write + retry/ 상한(용량·TTL) 적용.
+    pub fn save_bytes_to_retry(&self, json: &[u8]) -> Result<PathBuf> {
+        let id = Ulid::new().to_string();
+        let path = write_atomic(&self.retry_dir, &id, json)?;
+        self.retry_file_count.fetch_add(1, Ordering::SeqCst);
+        self.enforce_retry_limits();
+        Ok(path)
+    }
+
     /// 전송 성공 후 new/ 파일 삭제, used_bytes 감소
     pub fn commit(&self, path: &Path) {
         if path.as_os_str().is_empty() {
