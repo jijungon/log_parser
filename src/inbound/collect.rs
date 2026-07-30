@@ -1000,7 +1000,7 @@ pub async fn collect_logs(log_paths: &[String]) -> Value {
         let max_events = 500usize;
         let year = Utc::now().year();
 
-        let mut window = DedupWindow::new(14400u64, 50000);
+        let mut window = DedupWindow::new(14400u64, 50000, 3);
         let mut all_events: Vec<crate::envelope::DedupEvent> = Vec::new();
 
         'outer: for path in &log_paths {

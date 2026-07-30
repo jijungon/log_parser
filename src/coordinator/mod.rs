@@ -83,7 +83,11 @@ pub async fn run_pipeline(
     // 쌓이는 것(128MB cgroup 내 OOM)을 방지한다.
     let live_send_sem = Arc::new(tokio::sync::Semaphore::new(4));
 
-    let mut dedup = DedupWindow::new(dedup_cfg.window_seconds, dedup_cfg.lru_cap);
+    let mut dedup = DedupWindow::new(
+        dedup_cfg.window_seconds,
+        dedup_cfg.lru_cap,
+        dedup_cfg.sample_raws_cap,
+    );
     let mut cycle = cycle::CycleState::new(
         initial_seq,
         host.clone(),

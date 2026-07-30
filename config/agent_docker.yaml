@@ -30,3 +30,4 @@ inbound:
 dedup:
   window_seconds: 30
   lru_cap: 50000
+  sample_raws_cap: 3                # 그룹당 원본 로그 샘플 수 (기본값과 동일)

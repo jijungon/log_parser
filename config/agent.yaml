@@ -32,6 +32,8 @@ pipeline:
 dedup:
   window_seconds: 30                # 슬라이딩 윈도우 길이 (Phase B Step 4에서 측정 후 조정)
   lru_cap: 50000                    # 시그니처 캐시 상한. 초과 시 LRU evict + WARN
+  sample_raws_cap: 3                # 그룹당 보관할 원본 로그 샘플 수 (0 = 미보관) —
+                                    # envelope 크기의 지배 요인. 대역폭 절약 시 낮춰서 조정
 
 transport:
   kind: "http_json"                 # "http_json" (Phase B) | "otlp" (수신측 확정 후)
