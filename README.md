@@ -2,8 +2,6 @@
 
 호스트 로그를 수집·정제·압축하여 수신측 서버로 30분마다 자동 전송하는 경량 Rust 에이전트.
 
-**이 문서의 대상**: log_parser가 보내는 데이터를 받는 서버를 개발·운영하는 팀
-
 > 최근 변경 내역은 맨 아래 [변경 이력](#변경-이력) 참조.
 
 ## 역할별 읽기 체크리스트
@@ -30,6 +28,7 @@
 - [ ] 6. [examples/README.md](examples/README.md) — 실물 페이로드 샘플 4종 + 멱등 패턴 참고 코드(`receiver_example.py`)
 - [ ] 7. (선택) [docs/pull-api.md](docs/pull-api.md) — pull 클라이언트 구현 시
 - [ ] 8. (선택) [test_server/README.md](test_server/README.md) — 바로 띄워보는 더미 수신 서버 (멱등 없음 주의)
+- [ ] 9. (선택) **검색·분석 층까지 만든다면**: [reference/stack/README.md](reference/stack/README.md) — 카테고리에 맞물린 지식(`playbook.yaml`)·검색 채점(`goldset.yaml`)의 실물 견본. 이를 소비하는 참고 구현 전체는 `log_stack_AI`(별도 repo)
 
 **🦀 파서 개발자 — 코드를 고친다**
 
