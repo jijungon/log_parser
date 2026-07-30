@@ -38,9 +38,10 @@ Content-Encoding: gzip
 ```
 
 - Body는 gzip 압축된 JSON. 수신 후 먼저 압축 해제 후 파싱.
-- 수신 성공 응답: `200`, `202`, `204` 중 하나.
+- 수신 성공 응답: **2xx 전부** (200/202/204 등 — 파서는 `is_success()`로만 판정). 응답 코드별 파서 반응·재시도·자동 drain 의미론은 [receiver-implementation-guide.md](receiver-implementation-guide.md) §2~3.
 - 중복 수신 방지 키: `(host_id, boot_id, seq)` 세 값이 모두 동일하면 동일 데이터.
   - `stat_snapshot` / `sos_snapshot`은 `seq` 없음 → upsert 처리 권장.
+- 현재 envelope에는 `schema_version` 필드가 **없다** (도입 제안: [architecture-review.md](architecture-review.md) §4-4). 모르는 키는 무시하고 계속 처리할 것.
 
 ---
 
@@ -62,7 +63,8 @@ interface Cycle {
   boot_id:  string   // UUID 형식 — 재부팅마다 변경
   ts:       string   // RFC3339 — cycle 시작 타임스탬프
   window?:  string   // "시작/종료" ISO8601 구간 — log_batch 전용
-  seq?:     number   // u64 — 단조 증가 순번 — log_batch 전용, 프로세스 재시작 시 1부터
+  seq?:     number   // u64 — 단조 증가 순번 — log_batch 전용. seq.state 파일로 영속화되어
+                     //       에이전트 재시작 후에도 이어짐 (상태 파일 유실 시에만 1로 리셋)
 }
 
 interface Headers {
@@ -106,12 +108,12 @@ interface LogBatchEnvelope extends Envelope {
   event_kind: "log_batch"
   cycle: Cycle & { window: string; seq: number }
   headers: Headers & { counts: Counts; process_health: ProcessHealth }
-  body: [LogsSection]
+  body: [LogsSection] | []   // 이벤트 0건 cycle은 logs 섹션 없이 body: [] (total_sections: 0)
 }
 
 interface LogsSection {
   section: "logs"
-  data:    DedupEvent[]   // 빈 배열이면 해당 cycle에 주목할 이벤트 없음 — 정상
+  data:    DedupEvent[]   // 1개 이상 — 이벤트 0건이면 섹션 자체가 생략됨 (위 참조)
 }
 ```
 
@@ -120,8 +122,8 @@ interface LogsSection {
 | 조건 | 권장 대응 |
 |---|---|
 | `headers.counts.by_severity.critical > 0` | 즉시 알림 |
-| `body[0].data`가 빈 배열 | 호스트 정상 alive 신호 — 별도 처리 불필요 |
-| `seq`가 이전보다 2 이상 건너뜀 | spool 재전송 실패 이력 의심 |
+| `body`가 빈 배열 (`total_sections: 0`) | 호스트 정상 alive 신호 — 별도 처리 불필요 |
+| `seq` 구멍 | 즉시 유실 판정 금지 — 파킹분(`retry/`)은 수신 복구 후 **자동 drain으로 늦게 도착**한다 (TTL 168h 이내). **도착 순서 ≠ 발생 순서** 전제, TTL 경과 후 잔존 구멍만 유실 확정 ([receiver-implementation-guide.md](receiver-implementation-guide.md) §3) |
 | 35분 이상 수신 없음 | 호스트 이상 — 에이전트 다운 또는 네트워크 단절 |
 
 ---
@@ -140,10 +142,10 @@ interface StatSnapshotEnvelope extends Envelope {
     ProcessesSection,
     NetworkSection,
     SystemdSection,
-    StaticStateSection,
+    StaticStateSection,  // static_state.enabled=false(기본 true)면 이 섹션 자체가 생략 → 6개
     ConfigSection,
     HardwareSection,
-  ]  // 항상 7개 섹션, 순서 보장
+  ]  // 기본 7개 섹션, 순서 보장
 }
 ```
 
@@ -165,11 +167,11 @@ interface SosSnapshotEnvelope extends Envelope {
     ProcessesSection,
     NetworkSection,
     SystemdSection,
-    StaticStateSection,
+    StaticStateSection,  // static_state.enabled=false(기본 true)면 이 섹션 자체가 생략 → 7개
     ConfigSection,
     HardwareSection,
     LogsSection,  // 최근 4시간, 최대 500개
-  ]  // 항상 8개 섹션, 순서 보장
+  ]  // 기본 8개 섹션, 순서 보장
 }
 ```
 
@@ -184,12 +186,13 @@ interface SosSnapshotEnvelope extends Envelope {
 
 ```typescript
 interface DedupEvent {
-  source:      "journald" | "file.syslog" | "file.auth"
+  source:      "journald" | "file.syslog" | "file.auth" | "file.audit"
+               // push(log_batch) 기준. sos_snapshot의 logs(파일 재파싱)는 file.syslog | file.auth 만
   severity:    "critical" | "error" | "warn" | "info"
   category:    CategoryCode       // 아래 분류표 참조
   fingerprint: string             // 16자리 hex — 동일 패턴의 고유 ID
   template:    string             // 가변값이 placeholder로 치환된 정규화 문자열
-  sample_raws: string[]           // 원본 로그 라인 샘플 (최대 3개)
+  sample_raws: string[]           // 원본 로그 라인 샘플 (기본 최대 3개 — dedup.sample_raws_cap 설정)
   fields:      Record<string, JsonValue>  // 추출된 구조화 필드
   ts_first:    string             // RFC3339 — 패턴 최초 발생 시각
   ts_last:     string             // RFC3339 — 패턴 마지막 발생 시각
@@ -197,19 +200,25 @@ interface DedupEvent {
 }
 ```
 
-**Template Placeholder 규칙**
+**Template Placeholder 규칙** (정본: `src/normalize/tokens.rs` — 구체적 패턴 우선 순서)
 
 | Placeholder | 치환 대상 |
 |---|---|
-| `<NUM>` | 숫자 (PID, 포트, 횟수 등) |
-| `<IP4>` | IPv4 주소 |
 | `<UUID>` | UUID |
+| `<IP4>` / `<IP6>` | IPv4 / IPv6 주소 |
+| `SHA256:<FPR>` | SSH 키 지문 (`SHA256:` + base64 20자 이상) |
+| `[<ADDR>]` | 커널 스택 프레임 주소 (`[<ffffffff8100abcd>]`) |
+| `<CID>` | Docker 컨테이너 ID (`docker-<hex>`) |
+| `<VETH>` / `<BR>` | veth 가상 인터페이스명 / 도커 브리지명 (`br-<hex12>`) |
+| `<MNT>` | overlay2·buildkit·runc·netns 마운트 랜덤 ID |
+| `<HEX>` | MAC 주소, `0x` 접두 긴 16진수 |
 | `<PATH>` | 파일시스템 경로 (2단계 이상) |
-| `<HEX>` | MAC 주소, 16진수 값 |
-| `<DEV>` | 블록 디바이스명 (sda1, nvme0n1 등) |
-| `<WORD>` | 단일 알파벳 토큰 |
+| `<DEV>` | 블록 디바이스명 (sda1, nvme0n1, vdb, loop0 등) |
+| `<NUM>` | 숫자 (PID, 포트, 횟수 등 — 가장 마지막에 적용) |
 
-**Category 분류표**
+> `<WORD>`(단일 알파벳 토큰) placeholder는 **없다** — 일반 단어는 원문 그대로 남는다 (예: `Out of memory: Killed process <NUM> (java)`).
+
+**Category 분류표** (정본: [`../config/categories.yaml`](../config/categories.yaml) — first-match-wins, 파일 수정 + 재시작으로 코드 변경 없이 추가 가능. 아래는 대표 패턴 요약)
 
 | CategoryCode | 탐지 패턴 | 의미 |
 |---|---|---|
@@ -230,6 +239,7 @@ interface DedupEvent {
 | `auth.failure` | `authentication failure`, `Failed password` | 인증 실패 |
 | `auth.event` | `Accepted publickey` | 인증 성공 이벤트 |
 | `auth.bruteforce` | `POSSIBLE BREAK-IN ATTEMPT` | 브루트포스 의심 |
+| `session.activity` | `New session <N> of user`, `pam_unix(cron:session)` 등 | 정상 세션 생성·종료 활동 (CRON·logind) |
 | `ntp.drift` | `System clock wrong`, `time stepped` | 시간 동기화 오류 |
 | `container.oom` | `Memory cgroup out of memory` | 컨테이너 OOM |
 | `selinux.denial` | `avc: denied`, `type=AVC` | SELinux/AppArmor 차단 |
@@ -453,7 +463,7 @@ interface HardwareSection {
 | `host_id` | hex 문자열 (32자) | `"a8f3c1b94d2e4f1ab8c31234567890ab"` | /etc/machine-id 기반, 재설치 전 불변 |
 | `boot_id` | UUID 형식 (36자) | `"f1a2b3c4-5d6e-7f8a-9b0c-abcdef012345"` | /proc/sys/kernel/random/boot_id 기반, 재부팅마다 변경 |
 | `fingerprint` | hex 문자열 (16자) | `"a3f1c9e2b847d056"` | xxHash3_64 기반, PID·IP가 달라도 같은 패턴이면 동일 값 |
-| `seq` | u64 정수 | `42` | 프로세스 재시작 시 1부터 재시작, boot_id와 함께 중복 방지 키로 사용 |
+| `seq` | u64 정수 | `42` | `seq.state` 파일로 영속화 — 에이전트 재시작 후에도 이어짐(상태 파일 유실 시에만 1로 리셋). `(host_id, boot_id)`와 함께 중복 방지 키 |
 
 ---
 
@@ -471,6 +481,6 @@ interface HardwareSection {
 
 | event_kind | 섹션 수 | 포함 섹션 |
 |---|:---:|---|
-| `log_batch` | 1 | `logs` |
-| `stat_snapshot` | 7 | `metrics`, `processes`, `network`, `systemd`, `static_state`, `config`, `hardware` |
-| `sos_snapshot` | 8 | `metrics`, `processes`, `network`, `systemd`, `static_state`, `config`, `hardware`, `logs` |
+| `log_batch` | 1 (빈 cycle은 0) | `logs` (이벤트 0건이면 섹션 생략, `body: []`) |
+| `stat_snapshot` | 7 (`static_state` 비활성 시 6) | `metrics`, `processes`, `network`, `systemd`, `static_state`, `config`, `hardware` |
+| `sos_snapshot` | 8 (`static_state` 비활성 시 7) | `metrics`, `processes`, `network`, `systemd`, `static_state`, `config`, `hardware`, `logs` |

@@ -2,6 +2,15 @@
 
 > 최신 항목을 위에 추가한다. (루트 [README](README.md) 요약, 상세 설계는 [docs/](docs/README.md))
 
+## 2026-07-30 — 문서 전면 정비: README 링크 트리 + 수신 인수인계 (#28)
+
+코드 변경 없음(compose 제한 제외). 3트랙 병렬 + 통합 검증(링크 무결성·코드 대조·중복 검사).
+
+- **README 트리**: 루트 README 디렉토리 구조를 전 README(15개) 링크 허브로, 읽기 순서를 역할 3경로(운영자/수신 구현자/파서 개발자)로. src/README 모듈 표+데이터 흐름도, 모듈 README 7종을 #23~27 반영해 코드 정합 갱신.
+- **수신 인수인계**: `docs/receiver-implementation-guide.md` 신설(envelope 3종 중 구현은 /ingest 하나, 응답 코드 계약, at-least-once·멱등 키 `(host_id,boot_id,seq)`·도착 순서≠발생 순서·자동 drain 재배달, 필수/권장/선택 체크리스트). receiver-contract/type-spec/test-receiver 코드 대조 정정(INGEST_TOKEN→PUSH_OUTBOUND_TOKEN, 구식 포트 9101/9102→:9100 단일, seq 재시작 유지, 빈 cycle body:[] 등). docs/README 역할별 인덱스(historical 문서 구분). 아키텍처 리뷰를 docs/architecture-review.md로 이관.
+- **예시 파일 정합**: 존재하지 않는 `<WORD>`/`<TIMESTAMP>`/`<IP>` 토큰 → 실제 마스크(`<DEV>`·`<IP4>`·`<VETH>`, 일반 단어는 원문 유지)로 교정, 치환 규칙 표를 tokens.rs 실순서로 재작성, `warning`→`warn`, 유령 헤더 `last_changed_ts` 제거, 빈 cycle 형태 `body: []` 정정.
+- **정정**: CHANGELOG 07-27 항목 ERROR 티어 "9종"→**8종**(실코드 8개). docker-compose.yml에 `mem_limit: 256m`/`cpus: 0.5` 반영(서버 적용값 미러 — 도커 프로필은 내부 cgroup 비활성이라 유일한 안전벨트).
+
 ## 2026-07-30 — 저위험 마감 4건 (#27)
 
 아키텍처 리뷰 검증(3-에이전트 코드 대조)에서 확인된 잔여 마감.
@@ -50,7 +59,7 @@
 
 **분류 정확성 (#24, 패키지 C)**
 
-- **severity 커버리지**: CRITICAL에 read-only remount·MCE 추가 + **ERROR 티어 신설**(I/O error, blk_update_request, EXT4/XFS error, segfault at, GPF, hardware error, EDAC — 9종). 파일 소스(base=info)의 위험 이벤트가 info로 출하되던 구멍 보완. 승격만 있고 강등 없음, 오탐 방어 네거티브 테스트 포함.
+- **severity 커버리지**: CRITICAL에 read-only remount·MCE 추가 + **ERROR 티어 신설**(I/O error, blk_update_request, EXT4/XFS error, segfault at, GPF, hardware error, EDAC — 8종). 파일 소스(base=info)의 위험 이벤트가 info로 출하되던 구멍 보완. 승격만 있고 강등 없음, 오탐 방어 네거티브 테스트 포함.
 - **container.oom 도달 불능 수정**: first-match-wins에서 kernel.oom("Out of memory: Killed")이 cgroup OOM 라인을 선점 → container.oom 블록을 앞으로(narrow-before-broad). 호스트 OOM은 여전히 kernel.oom(회귀 테스트로 증명).
 
 검증: 브랜치별 193/202 passed → **병합 통합 213 passed, 0 failed**.

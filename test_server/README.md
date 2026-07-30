@@ -1,5 +1,7 @@
 # test-server
 
+> [← 프로젝트 루트(log_parser)](../README.md)
+
 log_parser Phase B 검증용 수신 서버.
 
 ## 시작

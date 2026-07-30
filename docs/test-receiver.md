@@ -2,22 +2,23 @@
 
 > **목적**: Phase B 구현 검증 전용. 운영 수신측(receiver-contract.md)과 무관한 별도 스펙.
 > 단순하게 만들고 빠르게 쓴다. 품질·확장성·운영 요건 없음.
+>
+> **⚠ 이 문서는 Phase B 당시 스펙(historical)이다.** 실제로 구동 가능한 더미 수신 서버는
+> [`../test_server/`](../test_server/) (FastAPI — `POST /ingest` 수신 + `/pull/stat`·`/pull/sos` 호출 + `/envelopes`·`/logs`·`/hosts`·`/compare` 조회)로 구현돼 있으며,
+> **멱등성이 없어**(재전송 시 그대로 중복 저장) 운영 수신측 참조로는 부적합하다. 멱등 패턴은 [`../examples/receiver_example.py`](../examples/receiver_example.py) 참조.
+> 아래 본문 중 설계 당시와 달라진 사실(포트·`/flush` 응답 형식)은 현행 기준으로 정정해 두었다 — pull API는 **전부 단일 포트 :9100**이다.
 
 ---
 
 ## 1. 이 서비스가 하는 것
 
 ```
-[ log_parser 에이전트 ]             [ test-receiver ]
-                                    
-  outbound push (30분)   ──────→   POST /ingest     (envelope 수신 + 저장)
-  inbound /flush         ←──────   receiver가 호출
-  
-[ stat_report (9102) ]
-  GET /stat              ←──────   receiver가 호출
+[ log_parser 에이전트 (:9100) ]     [ test-receiver ]
 
-[ sos_report (9101) ]
-  POST /trigger-sos      ←──────   receiver가 호출
+  outbound push (30분)   ──────→   POST /ingest     (envelope 수신 + 저장)
+  POST :9100/flush       ←──────   receiver가 호출 (응답 바디로 envelope 반환)
+  GET  :9100/stat        ←──────   receiver가 호출
+  POST :9100/trigger-sos ←──────   receiver가 호출
 ```
 
 **두 가지 역할:**
@@ -91,7 +92,7 @@ Body: <Envelope JSON>
 > **gzip 처리 정리**
 > - receiver.py (서버): log_parser push의 request body gzip → **수동 해제 필요** (HTTP 서버는 자동 처리 안 함)
 > - trigger.py stat/sos (클라이언트): response body gzip → `requests`가 **자동 해제** (`response.json()` 바로 호출)
-> - trigger.py flush (클라이언트): 단순 JSON 응답 (`{"ok": true, "seq": 42}`) — gzip 없음
+> - trigger.py flush (클라이언트): **응답도 gzip envelope** — `/flush`는 현재 cycle의 `log_batch` envelope을 HTTP 응답 바디로 직접 반환한다 (stat/sos와 동일하게 `requests`가 자동 해제). `{"ok": true}` 류의 확인 응답이 아니다
 
 **`GET /health`** → `200 OK {"ok": true}`
 
@@ -126,21 +127,22 @@ export SOS_TOKEN=my-sos-token
 ### 5.2 명령
 
 ```bash
-# log_parser에 flush 요청 (즉시 push 트리거)
+# log_parser에 flush 요청 (현재 cycle 즉시 방출 — 디버그용)
 python trigger.py flush
 # → POST http://$AGENT_HOST:9100/flush
-# → 응답: {"ok": true, "seq": 42} (단순 확인 응답)
-# → log_parser가 receiver.py로 push → received.jsonl에서 결과 확인
+# → 응답: 현재 cycle의 log_batch envelope (gzip JSON, 응답 바디로 직접 반환)
+# → ⚠ /ingest로 push되지 않는다 — flush된 cycle은 이 응답으로만 나가며 seq만 1 증가
+#   (수신 저장소에 그 seq의 구멍이 생긴다. pull-api.md 참조)
 
 # stat_report 조회
 python trigger.py stat
-# → GET http://$AGENT_HOST:9102/stat
+# → GET http://$AGENT_HOST:9100/stat
 # → 응답 Content-Encoding: gzip → requests 라이브러리가 자동 해제 → response.json() 바로 호출
 # → 응답 envelope 콘솔 출력 + received.jsonl에 저장
 
 # sos_report 전체 포렌식 (수집 완료까지 대기)
 python trigger.py sos
-# → POST http://$AGENT_HOST:9101/trigger-sos
+# → POST http://$AGENT_HOST:9100/trigger-sos
 # → 수집 완료까지 blocking (타임아웃 120초)
 # → 응답 Content-Encoding: gzip → requests 라이브러리가 자동 해제 → response.json() 바로 호출
 # → 응답 envelope 콘솔 출력 + received.jsonl에 저장
@@ -172,10 +174,10 @@ log_parser의 `agent.yaml`에서 test receiver를 outbound endpoint로 지정:
 
 ```yaml
 transport:
-  kind: "http_json"                          # Phase B 테스트용
+  kind: "http_json"                          # 현재 구현된 유일한 transport
   endpoint: "http://127.0.0.1:8080/ingest"  # test_receiver 주소
   token_env: "PUSH_OUTBOUND_TOKEN"
-  gzip: true
+  # gzip은 항상 적용된다 (끄는 키 없음). 압축 레벨만 조절 가능: http_gzip_level (기본 6)
 ```
 
 test_receiver 기동 시 토큰 맞춤:

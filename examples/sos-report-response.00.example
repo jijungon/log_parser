@@ -213,7 +213,7 @@
           "severity":    "critical",
           "category":    "kernel.oom",
           "fingerprint": "a3f1c9e2b847d056",
-          "template":    "Out of memory: Killed process <NUM> (<WORD>)",
+          "template":    "Out of memory: Killed process <NUM> (java)",
           "sample_raws": [
             "Out of memory: Killed process 2481 (java)",
             "Out of memory: Killed process 3102 (java)"
@@ -229,7 +229,7 @@
           "severity":    "error",
           "category":    "disk.io_error",
           "fingerprint": "c04ab8f31e72a190",
-          "template":    "blk_update_request: I/O error, dev <WORD>, sector <NUM>",
+          "template":    "blk_update_request: I/O error, dev <DEV>, sector <NUM>",
           "sample_raws": [
             "blk_update_request: I/O error, dev sdb, sector 4096000",
             "blk_update_request: I/O error, dev sdb, sector 4096512"
@@ -245,7 +245,7 @@
           "severity":    "warn",
           "category":    "fs.error",
           "fingerprint": "d19ef2a3b841c070",
-          "template":    "EXT4-fs error (device <WORD>): <WORD>:<NUM>",
+          "template":    "EXT4-fs error (device <DEV>): ext4_journal_check_start:<NUM>",
           "sample_raws": [
             "EXT4-fs error (device sdb1): ext4_find_entry:1455"
           ],
@@ -260,7 +260,7 @@
           "severity":    "warn",
           "category":    "systemd.restart_loop",
           "fingerprint": "e55b2c8a1f390d47",
-          "template":    "<WORD>.service: Start request repeated too quickly",
+          "template":    "myapp.service: Start request repeated too quickly",
           "sample_raws": [
             "app-worker.service: Start request repeated too quickly"
           ],
@@ -275,7 +275,7 @@
           "severity":    "warn",
           "category":    "auth.bruteforce",
           "fingerprint": "a3f2b1c9d847e056",
-          "template":    "Failed password for invalid user <WORD> from <IP> port <NUM> ssh2",
+          "template":    "Failed password for invalid user admin from <IP4> port <NUM> ssh2",
           "sample_raws": [
             "Failed password for invalid user admin from 203.0.113.42 port 51234 ssh2",
             "Failed password for invalid user admin from 10.0.0.99 port 44821 ssh2"
