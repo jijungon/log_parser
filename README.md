@@ -6,6 +6,49 @@
 
 > 최근 변경 내역은 맨 아래 [변경 이력](#변경-이력) 참조.
 
+## 역할별 읽기 체크리스트
+
+자기 역할의 체크리스트를 순서대로 읽으면 된다. (전체 지도가 필요하면 [디렉토리 구조](#디렉토리-구조))
+
+**🔧 운영자 — 설치하고 굴린다**
+
+- [ ] 1. [설계 의도 · 책임 경계](#설계-의도--책임-경계-먼저-읽기) — 파서가 하는 일 / 안 하는 일
+- [ ] 2. [사전 요건 · 빠른 시작](#사전-요건--빠른-시작-새-서버-bring-up) — 5분 만에 띄우기
+- [ ] 3. [docs/install.md](docs/install.md) — 설치(Docker/소스)·설정 키·토큰 4개·동작 검증 전체 절차
+- [ ] 4. [config/README.md](config/README.md) — 설정 파일 3종과 주요 키·기본값
+- [ ] 5. [장애 상황 동작 보장](#장애-상황-동작-보장-무손실-설계) + [재시도 정책](#재시도-정책) — 장애 때 로그가 어떻게 되나
+- [ ] 6. [docs/pull-api.md](docs/pull-api.md) — 사고 시 상세 수집 (`/stat`·`/trigger-sos`·`/raw`·`/drain-spool`)
+- [ ] 7. [운영 권장 사항](#운영-권장-사항) — 35분 침묵 감지·사고 대응 흐름
+
+**📥 수신 서비스 구현자 — 파서가 보내는 데이터를 받는 서버를 만든다 (인수인계)**
+
+- [ ] 1. [설계 의도 · 책임 경계](#설계-의도--책임-경계-먼저-읽기) — 저장·조회·분석은 수신측 몫이라는 경계
+- [ ] 2. [전체 흐름](#전체-흐름) — push(구현할 것)와 pull(선택) 두 방향
+- [ ] 3. ⭐ [docs/receiver-implementation-guide.md](docs/receiver-implementation-guide.md) — **구현 정본.** 이것 하나로 구현 시작 가능 (요건·응답 계약·멱등·순서·체크리스트·검증법)
+- [ ] 4. [docs/receiver-type-spec.md](docs/receiver-type-spec.md) — 필드 단위 스키마 (구현 중 참조)
+- [ ] 5. [docs/receiver-contract.md](docs/receiver-contract.md) — 계약 요약·수신측 운영 책임
+- [ ] 6. [examples/README.md](examples/README.md) — 실물 페이로드 샘플 4종 + 멱등 패턴 참고 코드(`receiver_example.py`)
+- [ ] 7. (선택) [docs/pull-api.md](docs/pull-api.md) — pull 클라이언트 구현 시
+- [ ] 8. (선택) [test_server/README.md](test_server/README.md) — 바로 띄워보는 더미 수신 서버 (멱등 없음 주의)
+
+**🦀 파서 개발자 — 코드를 고친다**
+
+- [ ] 1. [src/README.md](src/README.md) — 모듈 전체 지도 + 데이터 흐름도
+- [ ] 2. 데이터 흐름 순 모듈 README: [platform](src/platform/README.md) → [pipeline](src/pipeline/README.md) → [normalize](src/normalize/README.md) → [dedup](src/dedup/README.md) → [coordinator](src/coordinator/README.md) → [transport](src/transport/README.md) → [inbound](src/inbound/README.md)
+- [ ] 3. [config/README.md](config/README.md) — 코드 밖에서 동작을 바꾸는 설정·분류·필드 규칙
+- [ ] 4. [tests/README.md](tests/README.md) — E2E 검증 하네스 (수정 후 돌려볼 것)
+- [ ] 5. [docs/architecture-review.md](docs/architecture-review.md) — 현재 상태 평가와 남은 개선 후보 (수정 방향 잡을 때)
+
+**📚 etc — 특정 상황에서만 꺼내 읽는 것들**
+
+- [ ] [CHANGELOG.md](CHANGELOG.md) — 최근 무엇이 바뀌었나 (모든 역할 공통, 갱신 시점마다)
+- [ ] [docs/README.md](docs/README.md) — docs 전체 색인 (위 경로에 없는 문서를 찾을 때)
+- [ ] [docs/pipeline.md](docs/pipeline.md) — 로그 한 줄이 거치는 7단계 상세 (심화 이해)
+- [ ] [docs/observability-design.md](docs/observability-design.md) — 스트림/스냅샷 분리 설계 철학 (심화)
+- [ ] [docs/scale-contract.md](docs/scale-contract.md) — 수신측 저장 스케일 계약 (수신 저장소 설계 시)
+- [ ] [reference/stack/README.md](reference/stack/README.md) — `categories.yaml` 변경 시 함께 갱신할 수신측 파일 스냅샷
+- [ ] 설계 이력(historical, 현행과 다른 부분 있음): [docs/master-plan.md](docs/master-plan.md) · [docs/phase-b.md](docs/phase-b.md) · [docs/impl-notes.md](docs/impl-notes.md) · [docs/agent-roles.md](docs/agent-roles.md) · [docs/test-receiver.md](docs/test-receiver.md) — 초기 결정의 배경이 궁금할 때만
+
 ---
 
 ## 설계 의도 · 책임 경계 (먼저 읽기)
@@ -371,32 +414,6 @@ Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마
 - `data/` — 로컬 Docker용 런타임 spool 마운트 (`docker-compose.yml`이 `./data/spool`을 컨테이너 `/var/lib/log_parser`로 마운트, README 없음)
 - `target/` — cargo 빌드 산출물 (`.gitignore`로 git 제외)
 - 루트 파일 — `Dockerfile`·`docker-compose.yml`(Docker 실행), `.env.example`(환경변수 템플릿), [`CHANGELOG.md`](CHANGELOG.md)(변경 이력), `Cargo.toml`
-
----
-
-## 읽기 순서
-
-역할에 따라 세 갈래로 읽으면 된다.
-
-**(a) 운영자 — 설치하고 굴린다**
-
-1. 이 문서의 [사전 요건 · 빠른 시작](#사전-요건--빠른-시작-새-서버-bring-up)
-2. [docs/install.md](docs/install.md) — 설치(Docker/소스)·설정 키·토큰 4개·동작 검증 전체 절차
-3. [docs/pull-api.md](docs/pull-api.md) — `/stat`·`/trigger-sos`·`/drain-spool` 등 운영 호출 상세
-4. 이 문서의 [장애 상황 동작 보장](#장애-상황-동작-보장-무손실-설계) · [운영 권장 사항](#운영-권장-사항)
-
-**(b) 수신 서비스 구현자 — 파서가 보내는 데이터를 받는 서버를 만든다**
-
-1. 이 문서의 [수신 엔드포인트 구현 요건](#수신-엔드포인트-구현-요건) → [데이터 구조](#데이터-구조) → [중복 수신 방지](#중복-수신-방지)
-2. [docs/README.md](docs/README.md) — 문서 색인의 수신자 경로를 따라가기 (수신 계약·타입 스펙 등)
-3. [examples/README.md](examples/README.md) — 실제 envelope 샘플·수신 서버 예시 코드
-
-**(c) 파서 개발자 — 코드를 고친다**
-
-1. [src/README.md](src/README.md) — 모듈 전체 지도
-2. 데이터 흐름 순 모듈 README: [platform](src/platform/README.md) → [pipeline](src/pipeline/README.md) → [normalize](src/normalize/README.md) → [dedup](src/dedup/README.md) → [coordinator](src/coordinator/README.md) → [transport](src/transport/README.md) → [inbound](src/inbound/README.md)
-3. [config/README.md](config/README.md) — 코드 밖에서 동작을 바꾸는 설정·분류·필드 규칙
-4. [tests/README.md](tests/README.md) — E2E 검증 절차
 
 ---
 
