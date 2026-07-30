@@ -2,6 +2,18 @@
 
 > 최신 항목을 위에 추가한다. (루트 [README](README.md) 요약, 상세 설계는 [docs/](docs/README.md))
 
+## 2026-07-30 — 저위험 마감 4건 (#27)
+
+아키텍처 리뷰 검증(3-에이전트 코드 대조)에서 확인된 잔여 마감.
+
+- **persist_seq 원자화**: seq 파일도 temp+fsync+rename(`write_file_atomic` 공용 헬퍼 추출). 크래시 시 seq 잘림 → 무음 1 리셋 경로 차단.
+- **`dedup.sample_raws_cap`**: 그룹당 원본 샘플 수 하드코딩 3 → 설정(기본 3, 0=미보관). envelope 크기 조절 knob.
+- **corrupt/ 상한 256MB**: 격리함도 new/·retry/처럼 유계 — 초과 시 오래된 것부터 삭제(건별 warn).
+- **body_max_size_mb 주석 정정**: 실동작(warn 후 전송, 무손실)과 일치하게.
+
+계측 메모: system.general fallback = 원시 라인 가중 **8.3%**(누적 55 envelope) — 대량 로그는 정상 분류. 고유 패턴 기준 ~83%는 저빈도 잡로그의 다양성 문제로, categories 정밀화는 급하지 않음(검색 품질 관점의 선택 과제).
+검증: 235 passed. 기각 유지: critical 즉시 push(pull 모델 결정), Idempotency-Key(수신처 협조 필요·보류), sqlite 전환(과잉설계).
+
 ## 2026-07-29 — retry/ 자동 회수 + 카디널리티 폭증 방어 (#25 #26)
 
 #23이 남긴 운영 구멍(파킹된 critical은 수동 drain 없으면 TTL 후 삭제)과 감사 잔여 결함(LRU 축출 시 집계 무음 소실)을 마감.
