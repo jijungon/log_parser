@@ -14,6 +14,7 @@
 - [ ] 2. [사전 요건 · 빠른 시작](#사전-요건--빠른-시작-새-서버-bring-up) — 5분 만에 띄우기
 - [ ] 3. [docs/install.md](docs/install.md) — 설치(Docker/소스)·설정 키·토큰 4개·동작 검증 전체 절차
 - [ ] 4. [config/README.md](config/README.md) — 설정 파일 3종과 주요 키·기본값
+  +) 분류 규칙 [`config/categories.yaml`](config/categories.yaml) · 필드 추출 [`config/fields.yaml`](config/fields.yaml) — **재빌드 없이** 파일 수정+재시작만으로 반영되는 운영 손잡이
 - [ ] 5. [장애 상황 동작 보장](#장애-상황-동작-보장-무손실-설계) + [재시도 정책](#재시도-정책) — 장애 때 로그가 어떻게 되나
 - [ ] 6. [docs/pull-api.md](docs/pull-api.md) — 사고 시 상세 수집 (`/stat`·`/trigger-sos`·`/raw`·`/drain-spool`)
 - [ ] 7. [운영 권장 사항](#운영-권장-사항) — 35분 침묵 감지·사고 대응 흐름
@@ -28,13 +29,15 @@
 - [ ] 6. [examples/README.md](examples/README.md) — 실물 페이로드 샘플 4종 + 멱등 패턴 참고 코드(`receiver_example.py`)
 - [ ] 7. (선택) [docs/pull-api.md](docs/pull-api.md) — pull 클라이언트 구현 시
 - [ ] 8. (선택) [test_server/README.md](test_server/README.md) — 바로 띄워보는 더미 수신 서버 (멱등 없음 주의)
-- [ ] 9. (선택) **검색·분석 층까지 만든다면**: [reference/stack/README.md](reference/stack/README.md) — 카테고리에 맞물린 지식(`playbook.yaml`)·검색 채점(`goldset.yaml`)의 실물 견본. 이를 소비하는 참고 구현 전체는 `log_stack_AI`(별도 repo)
+- [ ] 9. (선택) **검색·분석 층까지 만든다면**: [reference/stack/README.md](reference/stack/README.md) — 카테고리에 맞물린 실물 견본 2종. 이를 소비하는 참고 구현 전체는 `log_stack_AI`(별도 repo)
+  +) [`playbook.yaml`](reference/stack/playbook.yaml)(카테고리별 원인·확인명령·대처 지식 — 분석 LLM에 주입) · [`goldset.yaml`](reference/stack/goldset.yaml)(검색 품질 채점 기준) — 정본은 `log_stack_AI`, 여긴 읽기 전용 스냅샷
 
 **🦀 파서 개발자 — 코드를 고친다**
 
 - [ ] 1. [src/README.md](src/README.md) — 모듈 전체 지도 + 데이터 흐름도
 - [ ] 2. 데이터 흐름 순 모듈 README: [platform](src/platform/README.md) → [pipeline](src/pipeline/README.md) → [normalize](src/normalize/README.md) → [dedup](src/dedup/README.md) → [coordinator](src/coordinator/README.md) → [transport](src/transport/README.md) → [inbound](src/inbound/README.md)
 - [ ] 3. [config/README.md](config/README.md) — 코드 밖에서 동작을 바꾸는 설정·분류·필드 규칙
+  +) [`config/categories.yaml`](config/categories.yaml)(분류 — 좁은 규칙을 위에, first-match-wins) · [`config/fields.yaml`](config/fields.yaml)(필드 추출). **categories를 바꾸면 수신측 playbook·goldset도 함께 동기화** (아래 ⭐ "가장 중요한 파일" 섹션 참조)
 - [ ] 4. [tests/README.md](tests/README.md) — E2E 검증 하네스 (수정 후 돌려볼 것)
 - [ ] 5. [docs/architecture-review.md](docs/architecture-review.md) — 현재 상태 평가와 남은 개선 후보 (수정 방향 잡을 때)
 
@@ -46,6 +49,7 @@
 - [ ] [docs/observability-design.md](docs/observability-design.md) — 스트림/스냅샷 분리 설계 철학 (심화)
 - [ ] [docs/scale-contract.md](docs/scale-contract.md) — 수신측 저장 스케일 계약 (수신 저장소 설계 시)
 - [ ] [reference/stack/README.md](reference/stack/README.md) — `categories.yaml` 변경 시 함께 갱신할 수신측 파일 스냅샷
+  +) 실물: [`playbook.yaml`](reference/stack/playbook.yaml) · [`goldset.yaml`](reference/stack/goldset.yaml) — 카테고리와 맞물려 있어 분류 체계를 바꾸면 이 둘이 깨진다
 - [ ] 설계 이력(historical, 현행과 다른 부분 있음): [docs/master-plan.md](docs/master-plan.md) · [docs/phase-b.md](docs/phase-b.md) · [docs/impl-notes.md](docs/impl-notes.md) · [docs/agent-roles.md](docs/agent-roles.md) · [docs/test-receiver.md](docs/test-receiver.md) — 초기 결정의 배경이 궁금할 때만
 
 ---
