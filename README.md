@@ -42,7 +42,7 @@
 
 **빠른 시작 — Docker (권장)**
 ```bash
-cp config/.env.example config/.env      # 토큰 4개 채우기 (환경변수 요약 참조)
+cp .env.example .env                    # repo 루트 — 토큰 4개 채우기 (환경변수 요약 참조)
 docker compose up -d --build            # agent_docker.yaml로 기동, :9100 노출
 docker compose logs -f log-parser       # 기동·수집 로그 확인
 ```
@@ -349,42 +349,52 @@ Envelope 공통 구조, `log_batch`/`stat_snapshot`/`sos_snapshot` 각 스키마
 
 ## 디렉토리 구조
 
-```
-log_parser/
-├── src/                        # Rust 소스
-├── config/
-│   ├── agent.yaml              # 에이전트 설정 (전체 키·기본값)
-│   ├── agent_docker.yaml       # Docker 실행용 설정
-│   ├── agent_test.yaml         # 테스트용 설정
-│   ├── categories.yaml         # 로그 카테고리 분류 규칙
-│   ├── fields.yaml             # 필드 추출 규칙 (logfmt/json 자동파싱 포함)
-│   ├── vector.toml             # ⚠ 참고용 스냅샷 — 실배포 설정은 vector_config.rs가 런타임 자동 생성
-│   └── .env.example            # 환경변수 템플릿
-├── examples/                   # envelope 응답 샘플 (JSON)
-├── docs/                       # 내부 설계·계약 문서 (docs/README.md = 색인)
-├── reference/stack/            # 수신측(log_stack_AI) 참조 스냅샷 (playbook·goldset, 정본 아님)
-├── tests/                      # E2E 테스트 하네스 (error_cases.yaml·inject_errors.sh)
-├── data/spool/                 # 런타임 spool WAL (Docker mount point)
-├── Dockerfile
-├── docker-compose.yml
-├── CHANGELOG.md                # 변경 이력
-└── Cargo.toml
-```
+각 디렉토리의 README가 그 디렉토리의 정본 문서다. 이 트리가 문서 허브 역할을 한다 — 링크를 따라 내려가면 된다.
+
+- **[`src/`](src/README.md)** — Rust 에이전트 소스 (모듈 전체 지도)
+  - [`platform/`](src/platform/README.md) — 호스트 환경 감지 (host ID·boot ID·로그 경로·cgroup)
+  - [`pipeline/`](src/pipeline/README.md) — Vector 실행·IPC 수신 (로그 수집)
+  - [`normalize/`](src/normalize/README.md) — 정규화 (토큰화 → severity → category → 필드 추출)
+  - [`dedup/`](src/dedup/README.md) — 슬라이딩 윈도우 중복 제거
+  - [`coordinator/`](src/coordinator/README.md) — Cycle 상태 관리·Envelope 조립
+  - [`transport/`](src/transport/README.md) — HTTP 전송·재시도·spool WAL
+  - [`inbound/`](src/inbound/README.md) — Pull API 서버 (`/stat`·`/trigger-sos`·`/flush`)
+  - `bin/` — 부하 측정 바이너리 `loadtest.rs` (README 없음, [`src/README.md`](src/README.md)에 설명)
+- **[`config/`](config/README.md)** — 에이전트 설정 정본 (`agent*.yaml`·`categories.yaml`·`fields.yaml`·`vector.toml`)
+- **[`docs/`](docs/README.md)** — 설계·계약 문서 색인 (설치·pull API·수신 계약·타입 스펙)
+- **[`examples/`](examples/README.md)** — 실제 envelope 응답 샘플(JSON)·수신 서버 예시 코드
+- **[`reference/stack/`](reference/stack/README.md)** — 수신측(log_stack_AI) 참조 스냅샷 (playbook·goldset, 정본 아님)
+- **[`test_server/`](test_server/README.md)** — Phase B 검증용 로컬 수신 서버 (별도 docker compose)
+- **[`tests/`](tests/README.md)** — E2E 테스트 하네스 (`error_cases.yaml`·`inject_errors.sh`)
+- `data/` — 로컬 Docker용 런타임 spool 마운트 (`docker-compose.yml`이 `./data/spool`을 컨테이너 `/var/lib/log_parser`로 마운트, README 없음)
+- `target/` — cargo 빌드 산출물 (`.gitignore`로 git 제외)
+- 루트 파일 — `Dockerfile`·`docker-compose.yml`(Docker 실행), `.env.example`(환경변수 템플릿), [`CHANGELOG.md`](CHANGELOG.md)(변경 이력), `Cargo.toml`
 
 ---
 
 ## 읽기 순서
 
-각 디렉토리의 README.md를 순서대로 읽으면 전체 구조를 파악할 수 있습니다.
+역할에 따라 세 갈래로 읽으면 된다.
 
-1. [config/README.md](config/README.md) — 설정 파일 구성과 주요 파라미터
-2. [src/README.md](src/README.md) — 소스 모듈 전체 구조
-3. [src/platform/README.md](src/platform/README.md) — 호스트 환경 감지 (에이전트 시작 시 가장 먼저 실행)
-4. [src/pipeline/README.md](src/pipeline/README.md) — 로그 수집
-5. [src/normalize/README.md](src/normalize/README.md) → [src/dedup/README.md](src/dedup/README.md) — 정규화·중복 제거
-6. [src/coordinator/README.md](src/coordinator/README.md) → [src/transport/README.md](src/transport/README.md) — Cycle 조립·전송
-7. [src/inbound/README.md](src/inbound/README.md) — Pull API
-8. [examples/README.md](examples/README.md) — 실제 envelope 샘플
+**(a) 운영자 — 설치하고 굴린다**
+
+1. 이 문서의 [사전 요건 · 빠른 시작](#사전-요건--빠른-시작-새-서버-bring-up)
+2. [docs/install.md](docs/install.md) — 설치(Docker/소스)·설정 키·토큰 4개·동작 검증 전체 절차
+3. [docs/pull-api.md](docs/pull-api.md) — `/stat`·`/trigger-sos`·`/drain-spool` 등 운영 호출 상세
+4. 이 문서의 [장애 상황 동작 보장](#장애-상황-동작-보장-무손실-설계) · [운영 권장 사항](#운영-권장-사항)
+
+**(b) 수신 서비스 구현자 — 파서가 보내는 데이터를 받는 서버를 만든다**
+
+1. 이 문서의 [수신 엔드포인트 구현 요건](#수신-엔드포인트-구현-요건) → [데이터 구조](#데이터-구조) → [중복 수신 방지](#중복-수신-방지)
+2. [docs/README.md](docs/README.md) — 문서 색인의 수신자 경로를 따라가기 (수신 계약·타입 스펙 등)
+3. [examples/README.md](examples/README.md) — 실제 envelope 샘플·수신 서버 예시 코드
+
+**(c) 파서 개발자 — 코드를 고친다**
+
+1. [src/README.md](src/README.md) — 모듈 전체 지도
+2. 데이터 흐름 순 모듈 README: [platform](src/platform/README.md) → [pipeline](src/pipeline/README.md) → [normalize](src/normalize/README.md) → [dedup](src/dedup/README.md) → [coordinator](src/coordinator/README.md) → [transport](src/transport/README.md) → [inbound](src/inbound/README.md)
+3. [config/README.md](config/README.md) — 코드 밖에서 동작을 바꾸는 설정·분류·필드 규칙
+4. [tests/README.md](tests/README.md) — E2E 검증 절차
 
 ---
 
