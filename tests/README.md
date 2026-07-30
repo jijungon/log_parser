@@ -66,9 +66,11 @@ cd ~/app/log_parseer_ai && git add tests/ && git commit -m "test: ..." && git pu
 ```
 → 그다음 위 **1단계(서버 git pull + 주입)** 부터 진행.
 
-> ⚠ 파서 **코드(`src/*.rs`)나 `config/*.yaml`** 을 바꿨으면, 1단계 `git pull` 뒤에
-> **`docker compose down && docker compose up -d`** 를 추가해야 반영된다
-> (config는 재기동만, 코드는 이미지 `build` 포함).
+> ⚠ 파서 **코드(`src/*.rs`)** 를 바꿨으면, 1단계 `git pull` 뒤에
+> **`docker compose up -d --build`** 로 이미지 재빌드까지 해야 반영된다
+> (`--build` 없이 `up`만 하면 기존 이미지를 재사용한다).
+> **`config/*.yaml`** 만 바꿨으면 재기동(`docker compose down && docker compose up -d`)으로
+> 충분하다 (설정 파일은 bind mount라 재기동 시 다시 읽힌다).
 
 ---
 
