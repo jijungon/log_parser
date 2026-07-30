@@ -419,9 +419,27 @@ fn is_json_file(path: &Path) -> bool {
 /// 전원 유실이 rename 앞에서 일어나면 temp만 남고(기동 시 정리),
 /// 뒤에서 일어나면 완전한 `.json`이 남는다 — 잘린 `.json`은 존재할 수 없다.
 fn write_atomic(dir: &Path, id: &str, data: &[u8]) -> Result<PathBuf> {
-    let tmp = dir.join(format!(".{id}.json.tmp"));
     let path = dir.join(format!("{id}.json"));
-    if let Err(e) = write_and_rename(&tmp, &path, data) {
+    write_file_atomic(&path, data)?;
+    Ok(path)
+}
+
+/// 임의 경로용 crash-safe 쓰기: 같은 디렉토리의 temp 파일(`.{filename}.tmp`)에
+/// write + fsync 후 rename → 부모 디렉토리 fsync(best effort).
+/// spool WAL뿐 아니라 seq.state 같은 작은 상태 파일 영속화에도 공용으로 쓴다 —
+/// 일반 fs::write는 crash 시 잘린 파일을 남길 수 있고, 잘린 상태 파일은
+/// 기동 파싱 실패 → 값 리셋으로 이어진다.
+pub(crate) fn write_file_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let filename = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .ok_or_else(|| anyhow::anyhow!("파일명 없는 경로: {}", path.display()))?;
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let tmp = dir.join(format!(".{filename}.tmp"));
+    if let Err(e) = write_and_rename(&tmp, path, data) {
         let _ = fs::remove_file(&tmp); // 실패 잔여물 정리 (없어도 무해)
         return Err(e);
     }
@@ -431,20 +449,20 @@ fn write_atomic(dir: &Path, id: &str, data: &[u8]) -> Result<PathBuf> {
     if let Ok(d) = fs::File::open(dir) {
         let _ = d.sync_all();
     }
-    Ok(path)
+    Ok(())
 }
 
 fn write_and_rename(tmp: &Path, path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let mut f = fs::File::create(tmp)
-        .with_context(|| format!("spool temp 생성 실패: {}", tmp.display()))?;
+        .with_context(|| format!("atomic write temp 생성 실패: {}", tmp.display()))?;
     f.write_all(data)
-        .with_context(|| format!("spool temp 쓰기 실패: {}", tmp.display()))?;
+        .with_context(|| format!("atomic write temp 쓰기 실패: {}", tmp.display()))?;
     f.sync_all()
-        .with_context(|| format!("spool temp fsync 실패: {}", tmp.display()))?;
+        .with_context(|| format!("atomic write temp fsync 실패: {}", tmp.display()))?;
     drop(f);
     fs::rename(tmp, path)
-        .with_context(|| format!("spool rename 실패: {}", path.display()))?;
+        .with_context(|| format!("atomic write rename 실패: {}", path.display()))?;
     Ok(())
 }
 
@@ -640,6 +658,28 @@ mod tests {
             .filter(|p| !is_json_file(p))
             .collect();
         assert!(leftovers.is_empty(), "save_bytes 후 temp 파일이 남으면 안 됨: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_file_atomic_roundtrip_without_tmp_leftover() {
+        let dir = tmp_dir("write_file_atomic");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("seq.state");
+
+        // round-trip: 쓰기 → 읽기 일치, 덮어쓰기도 동일 경로 유지
+        write_file_atomic(&path, b"42").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "42");
+        write_file_atomic(&path, b"43").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "43");
+
+        // temp 파일(.seq.state.tmp)이 rename 후 남아있으면 안 됨
+        let leftovers: Vec<_> = fs::read_dir(&dir).unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p != &path)
+            .collect();
+        assert!(leftovers.is_empty(), "temp 잔여물이 없어야 함: {leftovers:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 
