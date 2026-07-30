@@ -39,6 +39,7 @@ Body: gzip 압축된 Envelope JSON
 - **본문은 항상 gzip**이다 (`Content-Encoding: gzip` 고정, 압축 레벨 기본 6 = `transport.http_gzip_level`). 협상 없이 무조건 압축해 보내므로 수신측은 반드시 해제 후 파싱해야 한다.
 - **Bearer 토큰**: 파서가 환경변수(기본 이름 `PUSH_OUTBOUND_TOKEN`, `transport.token_env`로 변경 가능)에서 읽은 값을 그대로 실어 보낸다. 미설정 시 파서가 기동 자체를 거부하므로, 토큰 없는 요청은 파서가 보낸 것이 아니다. 검증은 상수 시간 비교 권장 (파서 자신의 inbound도 `subtle::ConstantTimeEq` 사용).
 - **타임아웃**: 파서의 요청 타임아웃은 기본 **30초**(`transport.request_timeout_seconds`)다. 이 안에 응답하지 못하면 네트워크 오류(=재시도 대상)로 분류되어 **같은 envelope이 다시 온다**. 무거운 처리는 뒤로 미루고 저장 확정 즉시 2xx를 돌려줄 것.
+- **전송 보안**: 인증은 Bearer 토큰뿐이므로 **평문 HTTP 구간에서는 토큰과 로그 내용이 그대로 노출**된다. `transport.endpoint`를 `https://`로 주면 파서가 TLS로 보낸다(`transport.tls_enabled: true` 기본 — `false`는 개발 전용). 운영에서는 **수신측이 HTTPS를 종단(리버스 프록시 등)하거나, 사설망 안에서만 받을 것**.
 
 ### 2.2 응답 코드 계약 (수신측 → 파서)
 
@@ -140,6 +141,7 @@ push되는 envelope 크기를 결정하는 파서 쪽 knob (전부 `config/agent
 | **권장** | seq 구멍 모니터링 — TTL 168h 경과 후 잔존분만 유실 확정 | §3.4 |
 | **권장** | 호스트별 35분 침묵 감시 | 빈 cycle도 오므로 침묵 = 이상 (§3.5) |
 | **권장** | 빠른 2xx + 비동기 후처리, 과부하 시 429+`Retry-After`(정수 초) 또는 5xx | §2.1 타임아웃 30s, §2.2 (429 남용은 파킹 유발) |
+| **권장** | HTTPS 종단(리버스 프록시 등) 또는 사설망 한정 수신 | Bearer 토큰·로그 내용의 평문 노출 방지 (§2.1 전송 보안) |
 | **선택** | pull API 클라이언트: `GET /stat` · `POST /trigger-sos` · `GET /raw` · `POST /drain-spool` + `GET /drain-status` · `POST /flush` | 사고 시 상세 수집·회수 ([pull-api.md](pull-api.md), 전부 단일 포트 :9100) |
 | **선택** | `fingerprint` 서버 간 상관 — 같은 지문이 여러 host에서 동시 발생 = 인프라 공통 장애 의심 | 지문 = `xxh3(template\|severity\|source)`, 호스트 무관 동일 패턴에 동일 값 |
 
