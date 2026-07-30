@@ -72,6 +72,9 @@ pub struct DedupConfig {
     pub window_seconds: u64,
     #[serde(default = "default_lru_cap")]
     pub lru_cap: usize,
+    /// dedup 그룹당 보관할 원본 로그 샘플 수 — envelope 크기의 지배 요인.
+    #[serde(default = "default_sample_raws_cap")]
+    pub sample_raws_cap: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,6 +210,7 @@ impl Default for DedupConfig {
         Self {
             window_seconds: default_dedup_window(),
             lru_cap: default_lru_cap(),
+            sample_raws_cap: default_sample_raws_cap(),
         }
     }
 }
@@ -275,6 +279,7 @@ fn default_body_max_events() -> usize { 100000 }
 fn default_body_max_size_mb() -> u64 { 50 }
 fn default_dedup_window() -> u64 { 30 }
 fn default_lru_cap() -> usize { 50000 }
+fn default_sample_raws_cap() -> usize { 3 }
 fn default_transport_kind() -> String { "http_json".into() }
 fn default_token_env() -> String { "PUSH_OUTBOUND_TOKEN".into() }
 fn default_connect_timeout() -> u64 { 10 }
@@ -314,6 +319,7 @@ mod tests {
         assert_eq!(cfg.cycle.window_seconds, 1800);
         assert_eq!(cfg.dedup.window_seconds, 30);
         assert_eq!(cfg.dedup.lru_cap, 50000);
+        assert_eq!(cfg.dedup.sample_raws_cap, 3, "sample_raws_cap 기본값은 3");
         assert_eq!(cfg.transport.spool_max_mb, 2048);
         assert_eq!(cfg.transport.retry_max_mb, 1024);
         assert_eq!(cfg.transport.retry_ttl_hours, 168);
@@ -333,6 +339,13 @@ mod tests {
         assert_eq!(cfg.dedup.window_seconds, 60);
         // unset fields still use defaults
         assert_eq!(cfg.dedup.lru_cap, 50000);
+        assert_eq!(cfg.dedup.sample_raws_cap, 3);
+    }
+
+    #[test]
+    fn dedup_sample_raws_cap_override_parsed() {
+        let cfg = parse("dedup:\n  sample_raws_cap: 1\n");
+        assert_eq!(cfg.dedup.sample_raws_cap, 1);
     }
 
     #[test]

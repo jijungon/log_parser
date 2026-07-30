@@ -8,6 +8,11 @@ use std::sync::Mutex;
 use tracing::{error, info, warn};
 use ulid::Ulid;
 
+/// corrupt/ 격리 보관 상한 (MB). new/(2048MB)·retry/(1024MB)와 달리
+/// 포렌식 보관용이라 설정 knob까지는 과함 — 상수로 충분.
+/// 초과 시 오래된 파일부터 삭제해 이론상 무한 증식을 막는다.
+const CORRUPT_MAX_MB: u64 = 256;
+
 /// Two-pool WAL spool.
 ///
 /// `new/`     — 현재 cycle WAL. save() → 전송 성공 시 commit()으로 삭제.
@@ -22,6 +27,7 @@ pub struct Spool {
     retry_file_count: AtomicUsize,     // retry/ 파일 수 (O(1) 조회, fs::read_dir 불필요)
     retry_max_bytes: u64,              // retry/ 용량 상한 (0 = 무제한)
     retry_ttl_secs: u64,               // retry/ 보관 기간 (0 = 무기한)
+    corrupt_max_bytes: u64,            // corrupt/ 용량 상한 (CORRUPT_MAX_MB — 테스트에서만 조정)
     save_lock: Mutex<()>,              // eviction check + write 직렬화
 }
 
@@ -81,6 +87,7 @@ impl Spool {
             // (테스트는 new()만 쓰므로 기존 동작 보존)
             retry_max_bytes: 0,
             retry_ttl_secs: 0,
+            corrupt_max_bytes: CORRUPT_MAX_MB * 1024 * 1024,
             save_lock: Mutex::new(()),
         })
     }
@@ -359,8 +366,43 @@ impl Spool {
                         |v| Some(v.saturating_sub(1))).ok();
                 }
                 error!(path = %dest.display(), size, "파손된 spool 파일 corrupt/로 격리 — 수동 확인 필요");
+                self.enforce_corrupt_limit();
             }
             Err(e) => warn!(src = %path.display(), err = %e, "corrupt/ 격리 실패 — 파일 원위치 보존"),
+        }
+    }
+
+    /// corrupt/ 총 용량이 상한(CORRUPT_MAX_MB)을 넘으면 오래된 파일부터 삭제.
+    /// 격리 파일은 `.json` 이름을 그대로 유지하므로 ULID 파일명 정렬 = 시간순
+    /// (new/ eviction과 동일한 idiom). 포렌식 데이터의 정책적 삭제라 건별 warn을 남긴다.
+    fn enforce_corrupt_limit(&self) {
+        let entries = match fs::read_dir(&self.corrupt_dir) {
+            Ok(e) => e,
+            Err(_) => return, // corrupt/ 없음 — 격리된 적 없으면 상한 검사 불필요
+        };
+        let mut files: Vec<(PathBuf, u64)> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| is_json_file(p))
+            .map(|p| {
+                let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                (p, size)
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0)); // ULID 이름순 = 오래된 것 먼저
+
+        let mut total: u64 = files.iter().map(|(_, s)| *s).sum();
+        let mut iter = files.into_iter();
+        while total > self.corrupt_max_bytes {
+            let (p, size) = match iter.next() {
+                Some(f) => f,
+                None => break,
+            };
+            if fs::remove_file(&p).is_ok() {
+                total = total.saturating_sub(size);
+                warn!(path = %p.display(), size,
+                    "corrupt/ 상한({CORRUPT_MAX_MB}MB) 초과 — 오래된 격리 파일 삭제");
+            }
         }
     }
 
@@ -419,9 +461,27 @@ fn is_json_file(path: &Path) -> bool {
 /// 전원 유실이 rename 앞에서 일어나면 temp만 남고(기동 시 정리),
 /// 뒤에서 일어나면 완전한 `.json`이 남는다 — 잘린 `.json`은 존재할 수 없다.
 fn write_atomic(dir: &Path, id: &str, data: &[u8]) -> Result<PathBuf> {
-    let tmp = dir.join(format!(".{id}.json.tmp"));
     let path = dir.join(format!("{id}.json"));
-    if let Err(e) = write_and_rename(&tmp, &path, data) {
+    write_file_atomic(&path, data)?;
+    Ok(path)
+}
+
+/// 임의 경로용 crash-safe 쓰기: 같은 디렉토리의 temp 파일(`.{filename}.tmp`)에
+/// write + fsync 후 rename → 부모 디렉토리 fsync(best effort).
+/// spool WAL뿐 아니라 seq.state 같은 작은 상태 파일 영속화에도 공용으로 쓴다 —
+/// 일반 fs::write는 crash 시 잘린 파일을 남길 수 있고, 잘린 상태 파일은
+/// 기동 파싱 실패 → 값 리셋으로 이어진다.
+pub(crate) fn write_file_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let filename = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .ok_or_else(|| anyhow::anyhow!("파일명 없는 경로: {}", path.display()))?;
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let tmp = dir.join(format!(".{filename}.tmp"));
+    if let Err(e) = write_and_rename(&tmp, path, data) {
         let _ = fs::remove_file(&tmp); // 실패 잔여물 정리 (없어도 무해)
         return Err(e);
     }
@@ -431,20 +491,20 @@ fn write_atomic(dir: &Path, id: &str, data: &[u8]) -> Result<PathBuf> {
     if let Ok(d) = fs::File::open(dir) {
         let _ = d.sync_all();
     }
-    Ok(path)
+    Ok(())
 }
 
 fn write_and_rename(tmp: &Path, path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let mut f = fs::File::create(tmp)
-        .with_context(|| format!("spool temp 생성 실패: {}", tmp.display()))?;
+        .with_context(|| format!("atomic write temp 생성 실패: {}", tmp.display()))?;
     f.write_all(data)
-        .with_context(|| format!("spool temp 쓰기 실패: {}", tmp.display()))?;
+        .with_context(|| format!("atomic write temp 쓰기 실패: {}", tmp.display()))?;
     f.sync_all()
-        .with_context(|| format!("spool temp fsync 실패: {}", tmp.display()))?;
+        .with_context(|| format!("atomic write temp fsync 실패: {}", tmp.display()))?;
     drop(f);
     fs::rename(tmp, path)
-        .with_context(|| format!("spool rename 실패: {}", path.display()))?;
+        .with_context(|| format!("atomic write rename 실패: {}", path.display()))?;
     Ok(())
 }
 
@@ -644,6 +704,28 @@ mod tests {
     }
 
     #[test]
+    fn write_file_atomic_roundtrip_without_tmp_leftover() {
+        let dir = tmp_dir("write_file_atomic");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("seq.state");
+
+        // round-trip: 쓰기 → 읽기 일치, 덮어쓰기도 동일 경로 유지
+        write_file_atomic(&path, b"42").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "42");
+        write_file_atomic(&path, b"43").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "43");
+
+        // temp 파일(.seq.state.tmp)이 rename 후 남아있으면 안 됨
+        let leftovers: Vec<_> = fs::read_dir(&dir).unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p != &path)
+            .collect();
+        assert!(leftovers.is_empty(), "temp 잔여물이 없어야 함: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn truncated_json_is_quarantined_by_load_or_quarantine() {
         let dir = tmp_dir("quarantine");
         // 전원 유실로 잘린 json을 new/에 직접 생성 (구버전 fs::write 시나리오)
@@ -664,6 +746,52 @@ mod tests {
         );
         assert_eq!(spool.new_used_bytes(), 0, "격리 후 used_bytes에서 차감되어야 함");
         assert!(spool.pending().is_empty(), "격리 후 replay 대상에서 제외되어야 함");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_cap_deletes_oldest_when_exceeded() {
+        let dir = tmp_dir("corrupt_cap");
+        let mut spool = Spool::new(dir.to_str().unwrap(), 10).unwrap();
+        spool.corrupt_max_bytes = 250; // 테스트용 소형 상한 (실제 256MB는 테스트 불가)
+
+        // 100바이트 파손 파일 3개를 시간순 ULID로 new/에 생성 후 순차 격리
+        let now_ms = Utc::now().timestamp_millis() as u64;
+        let ids: Vec<String> = (0..3u64)
+            .map(|i| Ulid::from_parts(now_ms + i, i as u128).to_string())
+            .collect();
+        for id in &ids {
+            let p = dir.join("new").join(format!("{id}.json"));
+            fs::write(&p, vec![b'x'; 100]).unwrap();
+            spool.quarantine(&p);
+        }
+
+        // 3번째 격리 시 총 300 > 250 → 가장 오래된 파일만 삭제 → 200 ≤ 250
+        let corrupt = dir.join("corrupt");
+        assert!(!corrupt.join(format!("{}.json", ids[0])).exists(),
+            "상한 초과 시 oldest 격리 파일부터 삭제되어야 함");
+        assert!(corrupt.join(format!("{}.json", ids[1])).exists(), "최신 파일은 보존");
+        assert!(corrupt.join(format!("{}.json", ids[2])).exists(), "최신 파일은 보존");
+        let total: u64 = fs::read_dir(&corrupt).unwrap()
+            .flatten()
+            .filter(|e| is_json_file(&e.path()))
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        assert!(total <= 250, "corrupt/ 총량이 상한 이하로 유지되어야 함: {total}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_below_cap_deletes_nothing() {
+        let dir = tmp_dir("corrupt_below_cap");
+        let spool = Spool::new(dir.to_str().unwrap(), 10).unwrap(); // 기본 상한 256MB
+        let id = Ulid::new().to_string();
+        let p = dir.join("new").join(format!("{id}.json"));
+        fs::write(&p, b"{\"truncated").unwrap();
+        spool.quarantine(&p);
+        assert!(dir.join("corrupt").join(format!("{id}.json")).exists(),
+            "상한 이하 격리 파일은 삭제 없이 보존되어야 함");
         let _ = fs::remove_dir_all(&dir);
     }
 

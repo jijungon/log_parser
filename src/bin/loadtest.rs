@@ -158,7 +158,8 @@ async fn main() -> Result<()> {
     );
 
     let base_ts = chrono::Utc::now();
-    let mut window = DedupWindow::new(window_seconds, lru_cap);
+    // sample_raws_cap=3: 프로덕션 agent.yaml(dedup.sample_raws_cap) 기본값과 정렬
+    let mut window = DedupWindow::new(window_seconds, lru_cap, 3);
     // 시간 만료로 방출된 이벤트 '수'만 센다(누적 저장 X — 고카디널리티에서 도구 메모리 폭발 방지).
     // LRU 조기방출분은 window.total_evictions()로 따로 읽는다(실제 이벤트는 flush_all에 포함).
     let mut emitted_expired: u64 = 0;

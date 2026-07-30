@@ -20,17 +20,21 @@ pub struct DedupWindow {
     cache: LruCache<u64, DedupState>,
     window_secs: i64,
     total_evictions: u64,
+    // 그룹당 보관할 원본 로그 샘플 수 상한 (config dedup.sample_raws_cap) —
+    // envelope 크기의 지배 요인이라 설정으로 노출한다.
+    sample_raws_cap: usize,
     // LRU cap 초과로 축출된 그룹을 폐기하지 않고 보관 → 다음 flush_expired/flush_all에서 방출.
     // 크기는 5초 dedup_tick 사이의 축출량으로 자연히 유계(매 tick마다 비워짐) — 별도 상한 불필요.
     evicted_pending: Vec<DedupEvent>,
 }
 
 impl DedupWindow {
-    pub fn new(window_seconds: u64, lru_cap: usize) -> Self {
+    pub fn new(window_seconds: u64, lru_cap: usize, sample_raws_cap: usize) -> Self {
         Self {
             cache: LruCache::new(NonZeroUsize::new(lru_cap).expect("lru_cap > 0")),
             window_secs: window_seconds as i64,
             total_evictions: 0,
+            sample_raws_cap,
             evicted_pending: Vec::new(),
         }
     }
@@ -54,7 +58,7 @@ impl DedupWindow {
                 if ts > state.ts_last {
                     state.ts_last = ts;
                 }
-                if state.sample_raws.len() < 3 {
+                if state.sample_raws.len() < self.sample_raws_cap {
                     state.sample_raws.push(raw.to_string());
                 }
                 if severity == "critical" && state.severity != "critical" {
@@ -86,7 +90,7 @@ impl DedupWindow {
                 if ts > state.ts_last {
                     state.ts_last = ts;
                 }
-                if state.sample_raws.len() < 3 {
+                if state.sample_raws.len() < self.sample_raws_cap {
                     state.sample_raws.push(raw);
                 }
                 if severity == "critical" && state.severity != "critical" {
@@ -170,13 +174,15 @@ impl DedupWindow {
         // LruCache::push의 반환값은 언제나 cap 초과로 축출된 **다른 키**의 LRU 항목이다.
         // 폐기하는 대신 flush와 동일한 변환(to_event)으로 DedupEvent를 만들어 버퍼에 보관
         // → 다음 flush_expired/flush_all(코디네이터 5초 dedup_tick)에서 방출 → 유실 0.
+        // sample_raws_cap=0이면 샘플 자체를 보관하지 않는다 (템플릿·count만 전송)
+        let sample_raws = if self.sample_raws_cap == 0 { Vec::new() } else { vec![raw] };
         if let Some((evicted_key, evicted_state)) = self.cache.push(
             fingerprint,
             DedupState {
                 count: 1,
                 ts_first: ts,
                 ts_last: ts,
-                sample_raws: vec![raw],
+                sample_raws,
                 severity,
                 category,
                 source,
@@ -202,7 +208,7 @@ mod tests {
 
     #[test]
     fn within_window_merges_count() {
-        let mut w = DedupWindow::new(30, 100);
+        let mut w = DedupWindow::new(30, 100, 3);
         assert!(push_simple(&mut w, 1, "error").is_none());
         assert!(push_simple(&mut w, 1, "error").is_none());
         assert!(push_simple(&mut w, 1, "error").is_none());
@@ -213,7 +219,7 @@ mod tests {
 
     #[test]
     fn different_fingerprints_are_separate() {
-        let mut w = DedupWindow::new(30, 100);
+        let mut w = DedupWindow::new(30, 100, 3);
         push_simple(&mut w, 1, "error");
         push_simple(&mut w, 2, "warn");
         let events = w.flush_all();
@@ -222,7 +228,7 @@ mod tests {
 
     #[test]
     fn flush_expired_only_emits_stale() {
-        let mut w = DedupWindow::new(0, 100); // 0s window → expires after ≥1 elapsed second
+        let mut w = DedupWindow::new(0, 100, 3); // 0s window → expires after ≥1 elapsed second
         push_simple(&mut w, 1, "info");
         // num_seconds() floors to integer seconds; need >1s to satisfy `elapsed > 0`
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -233,7 +239,7 @@ mod tests {
 
     #[test]
     fn critical_severity_promoted() {
-        let mut w = DedupWindow::new(30, 100);
+        let mut w = DedupWindow::new(30, 100, 3);
         push_simple(&mut w, 1, "error"); // first insert as error
         push_simple(&mut w, 1, "critical"); // upgrade to critical
         let events = w.flush_all();
@@ -242,17 +248,38 @@ mod tests {
 
     #[test]
     fn sample_raws_capped_at_3() {
-        let mut w = DedupWindow::new(30, 100);
+        let mut w = DedupWindow::new(30, 100, 3);
         for _ in 0..10 {
             push_simple(&mut w, 1, "info");
         }
         let events = w.flush_all();
-        assert!(events[0].sample_raws.len() <= 3);
+        assert_eq!(events[0].sample_raws.len(), 3, "기본 cap 3 — 초과 샘플은 버려짐");
+    }
+
+    #[test]
+    fn sample_raws_cap_1_keeps_exactly_one() {
+        let mut w = DedupWindow::new(30, 100, 1);
+        for _ in 0..10 {
+            push_simple(&mut w, 1, "info");
+        }
+        let events = w.flush_all();
+        assert_eq!(events[0].sample_raws.len(), 1, "cap=1이면 샘플 정확히 1개만 보관");
+    }
+
+    #[test]
+    fn sample_raws_cap_0_keeps_no_samples() {
+        let mut w = DedupWindow::new(30, 100, 0);
+        for _ in 0..5 {
+            push_simple(&mut w, 1, "info");
+        }
+        let events = w.flush_all();
+        assert!(events[0].sample_raws.is_empty(), "cap=0이면 샘플 미보관 (count·템플릿만)");
+        assert_eq!(events[0].count, 5, "샘플 미보관이어도 count 집계는 유지");
     }
 
     #[test]
     fn lru_eviction_emits_instead_of_discarding() {
-        let mut w = DedupWindow::new(30, 3); // 작은 cap으로 축출 유도
+        let mut w = DedupWindow::new(30, 3, 3); // 작은 cap으로 축출 유도
         // fp=1에 5건 누적 → LRU 최후순위가 되도록 먼저 넣음
         for _ in 0..5 {
             push_simple(&mut w, 1, "error");
@@ -279,7 +306,7 @@ mod tests {
 
     #[test]
     fn evicted_pending_drains_via_flush_expired() {
-        let mut w = DedupWindow::new(30, 2);
+        let mut w = DedupWindow::new(30, 2, 3);
         push_simple(&mut w, 1, "info");
         push_simple(&mut w, 2, "info");
         push_simple(&mut w, 3, "info"); // fp=1 축출
@@ -295,7 +322,7 @@ mod tests {
 
     #[test]
     fn out_of_order_event_does_not_move_ts_last_backward() {
-        let mut w = DedupWindow::new(30, 100);
+        let mut w = DedupWindow::new(30, 100, 3);
         let now = Utc::now();
         let past = now - chrono::Duration::seconds(10);
         // First event: now

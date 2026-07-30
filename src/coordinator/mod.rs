@@ -83,7 +83,11 @@ pub async fn run_pipeline(
     // 쌓이는 것(128MB cgroup 내 OOM)을 방지한다.
     let live_send_sem = Arc::new(tokio::sync::Semaphore::new(4));
 
-    let mut dedup = DedupWindow::new(dedup_cfg.window_seconds, dedup_cfg.lru_cap);
+    let mut dedup = DedupWindow::new(
+        dedup_cfg.window_seconds,
+        dedup_cfg.lru_cap,
+        dedup_cfg.sample_raws_cap,
+    );
     let mut cycle = cycle::CycleState::new(
         initial_seq,
         host.clone(),
@@ -295,11 +299,22 @@ fn ingest_event(
     }
 }
 
+/// seq를 atomic write(temp→fsync→rename)로 영속화. 일반 write는 crash 시
+/// 잘린 파일을 남길 수 있고, 잘린 seq 파일은 기동 파싱 실패 → seq가 1로
+/// 조용히 리셋된다 (main.rs unwrap_or(1)). 동기 fs 호출이라 spawn_blocking으로 격리.
 async fn persist_seq(path: &str, seq: u64) {
-    if !path.is_empty() {
-        if let Err(e) = tokio::fs::write(path, seq.to_string()).await {
-            warn!(path, "seq state 저장 실패: {e}");
-        }
+    if path.is_empty() {
+        return;
+    }
+    let path_owned = PathBuf::from(path);
+    let data = seq.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::transport::spool::write_file_atomic(&path_owned, data.as_bytes())
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("seq 저장 spawn_blocking 패닉: {e}")));
+    if let Err(e) = result {
+        warn!(path, "seq state 저장 실패: {e}");
     }
 }
 
@@ -955,6 +970,14 @@ mod tests {
 
         persist_seq(path_str, 43).await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "43");
+
+        // atomic write의 temp 파일(.seq.state.tmp)이 rename 후 남아있으면 안 됨
+        let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p != &path)
+            .collect();
+        assert!(leftovers.is_empty(), "persist_seq 후 temp 잔여물이 없어야 함: {leftovers:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
