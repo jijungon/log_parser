@@ -3,24 +3,33 @@
 > 본 프로젝트 외부에 있는 **수신 서비스와의 약속**.
 > 이 프로젝트는 receiver 자체를 만들지 않지만, envelope을 받는 쪽이 무엇을 보장해야 envelope 모델이 의미 있는지를 이 문서에 명시.
 > receiver 구현은 본 프로젝트 외부 (운영 팀 또는 별개 프로젝트가 책임).
+> **구현 절차·체크리스트는 [receiver-implementation-guide.md](receiver-implementation-guide.md)**, 타입 정의는 [receiver-type-spec.md](receiver-type-spec.md).
 
 ---
 
 ## 1. 송출 contract (log_parser → receiver)
 
-> **kind="http_json" 기준** (Phase B default). kind="otlp"는 gRPC+protobuf — `master-plan.md §7.7.3` 참조.
+> **kind="http_json" 기준 — 현재 구현된 유일한 transport** (`src/transport/mod.rs`는 다른 kind에서 기동 거부). kind="otlp"(gRPC+protobuf)는 설계 시 후보였으나 **미구현** — `master-plan.md §7.7.3`은 이력 참조.
 
 ```
-POST <ingest endpoint, agent.yaml의 transport.endpoint>
-Authorization: Bearer ${INGEST_TOKEN}
+POST <ingest endpoint, agent.yaml의 transport.endpoint — 단일 URL>
+Authorization: Bearer ${PUSH_OUTBOUND_TOKEN}   # transport.token_env가 가리키는 환경변수의 값
 Content-Type: application/json
-Content-Encoding: gzip
-Body: <Envelope JSON, master-plan.md §10 schema>
+Content-Encoding: gzip                          # 항상 gzip (협상 없음)
+Body: <Envelope JSON — receiver-type-spec.md schema>
 
-Response 2xx (200, 202, 204): 수신 성공. 송신 buffer 비움
-Response 5xx, 429, 네트워크 에러: 재시도 가능 (간격을 점점 늘려가며)
-Response 4xx (401, 403): 치명 오류. 토큰·인증 문제. 알림 로그
+Response 2xx (전부):          수신 성공 — 파서가 spool WAL 삭제(commit) + retry/ 자동 drain 트리거
+Response 429:                Retry-After(정수 초, 없으면 60) 대기 후 재시도 — 재시도 한도를 소모함
+Response 5xx · 네트워크 에러:  지수 백오프 재시도 (기본 5s→최대 300s 간격, 한도 소진 시 retry/ 파킹)
+Response 그 외 (4xx·3xx 전부): 치명(Fatal) — 재시도 없이 즉시 retry/ 파킹 (drain으로만 재전송)
 ```
+
+**배달 의미론 (수신측이 전제해야 하는 것)** — 상세·근거는 [receiver-implementation-guide.md](receiver-implementation-guide.md) §3:
+
+- **at-least-once** — 2xx 응답이 유실되면 같은 cycle이 통째로 재전송된다 → 멱등 처리 필수 (§2).
+- **파킹분 자동 회수** — `retry/`에 파킹된 envelope은 이후 라이브 전송 성공(수신 복구 증거) 시 **자동 drain**(`transport.auto_drain` 기본 true)으로, 또는 수동 `POST :9100/drain-spool`로 재전송된다.
+- **도착 순서 ≠ 발생 순서** — 자동 drain은 최신 envelope 성공 *직후* 돌기 때문에 옛 seq가 늦게 도착하는 것이 정상.
+- **최대 지연 = retry/ TTL 기본 168h** (`transport.retry_ttl_hours`) — 초과분은 오래된 것부터 삭제(영구 유실).
 
 ---
 
@@ -29,12 +38,13 @@ Response 4xx (401, 403): 치명 오류. 토큰·인증 문제. 알림 로그
 | 책임 | 권장 동작 |
 |---|---|
 | 인덱싱 | `(host_id, boot_id, window)` 복합 키로 인덱싱 |
-| 중복 방지 | `(host_id, boot_id, seq)` 3개 값이 모두 같으면 같은 데이터로 간주해 한 번만 처리 |
+| 중복 방지 | `(host_id, boot_id, seq)` 3개 값이 모두 같으면 같은 데이터로 간주해 한 번만 처리 (stat/sos는 seq 없음 → `ts` 보조 키 upsert) |
+| 재배달 수용 | 도착 순서에 의존하지 않고 `cycle.window`·`ts_first` 기준 시간 정렬 저장. seq 구멍은 TTL(168h)까지 "배달 중"으로 취급 후 유실 확정 |
 | body 분석 | severity·category·template·fingerprint 기반 패턴 매칭. 시간순 연결 |
 | Alerting | `observability-design.md §9` 권장 룰 셋 (panic 키워드, hw 에러, fs.readonly, 재시작 루프, 에러율 폭증, 부팅 직후, 호스트 침묵) |
-| 상세 수집 | "사고다" 판단 시 `GET host:9102/stat` + `POST host:9100/flush` + `POST host:9101/trigger-sos` 병렬 호출 |
-| 호스트 침묵 감지 | log_parser envelope 30분 + grace 5분 안에 안 오면 호스트 이상 (host_id 기준) |
-| Cool-down | 같은 호스트·같은 사고로 sos 중복 호출 방지 |
+| 상세 수집 | "사고다" 판단 시 `GET :9100/stat` + `POST :9100/trigger-sos` 호출, 원문 필요 시 `GET :9100/raw` — **전부 단일 포트 :9100** ([pull-api.md](pull-api.md)) |
+| 호스트 침묵 감지 | log_parser envelope 30분 + grace 5분 안에 안 오면 호스트 이상 (host_id 기준 — 빈 cycle도 전송되므로 침묵은 항상 이상 신호) |
+| Cool-down | 같은 호스트·같은 사고로 sos 중복 호출 방지 (pull API는 파서 측 rate-limit도 있음 — 429 + Retry-After) |
 | 결과 묶기 | `host_id` 기준으로 log_batch / stat_snapshot / sos_snapshot 세 envelope을 연결 |
 
 ---
@@ -67,6 +77,8 @@ Response 4xx (401, 403): 치명 오류. 토큰·인증 문제. 알림 로그
 ---
 
 ## 5. Envelope schema 진화 정책
+
+> **현재 envelope에는 `schema_version` 필드가 없다** (`src/envelope.rs` 기준 — 도입 제안은 [architecture-review.md](architecture-review.md) §4-4, 보류 상태). 아래 표는 필드 도입 시점부터 적용할 규율이며, 그때까지 실효 규칙은 마지막 두 줄(모르는 키 무시)이다.
 
 | 변경 종류 | schema_version 변경 | 호환성 |
 |---|---|---|
