@@ -187,8 +187,10 @@ Content-Encoding: gzip
 | `200`, `202`, `204` | 수신 성공      | spool에서 파일 삭제, 다음 cycle 시작                 |
 | `429`               | Rate limit | 재시도 (지수 백오프)                               |
 | `5xx`               | 서버 오류      | 재시도 (지수 백오프)                               |
-| `401`, `403`        | 인증 오류      | **재시도 없음** — `retry/`로 이동 (drain API로 재전송) |
-| `4xx` (기타)          | 요청 오류      | **재시도 없음** — `retry/`로 이동 (drain API로 재전송) |
+| `401`, `403`        | 인증 오류      | **재시도 없음** — `retry/`로 이동 (수신 복구 시 자동 drain 또는 drain API로 재전송) |
+| `4xx` (기타)          | 요청 오류      | **재시도 없음** — `retry/`로 이동 (수신 복구 시 자동 drain 또는 drain API로 재전송) |
+
+> 429의 Retry-After 대기·시도 소진, 파킹·자동 회수까지 포함한 **정밀 계약은 [`docs/receiver-implementation-guide.md`](docs/receiver-implementation-guide.md)** (수신 구현자용 정본) 참조.
 
 ### spool (WAL) 두 풀 구조
 

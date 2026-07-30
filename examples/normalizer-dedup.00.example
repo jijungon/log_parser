@@ -1,19 +1,21 @@
 # Normalizer + Deduplicator — 처리 예시
-# 참조: 2_MASTER_PLAN.md §7.4
-# 치환 순서: UUID → IP → TIMESTAMP → PATH → HEX → NUM → WORD
+# 정본: src/normalize/tokens.rs (마스크 정의·순서), src/dedup/window.rs (집계)
+# 치환 순서: UUID → IP4/IP6 → SHA256:<FPR> → [<ADDR>] → 컨테이너ID(CID/VETH/BR/MNT) → HEX(MAC) → PATH → DEV → HEX(0x) → NUM
+# 일반 단어(java·admin·유닛명 등)는 치환하지 않고 원문 유지 — 전용 타임스탬프 토큰도 없음(ISO 시각은 <NUM> 조각으로 분해)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 예시 1: OOM Killer (count > 1)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 raw:        "Out of memory: Killed process 2481 (java)"
 
-[1] 치환:   "Out of memory: Killed process <NUM> (<WORD>)"
+[1] 치환:   "Out of memory: Killed process <NUM> (java)"
+            ↑ 프로세스명(java)은 일반 단어라 원문 유지 — 숫자만 마스킹
 
 [3] 집계:   key   = (fingerprint, host="db-01", source="syslog")
             value = { count: 5, first_ts: 10:00:01, last_ts: 10:00:22,
                       sample_raws: ["...2481 (java)", "...3102 (java)", "...3891 (java)"] }
 
-[4] flush:  "Out of memory: Killed process <NUM> (<WORD>)
+[4] flush:  "Out of memory: Killed process <NUM> (java)
              × 5회 | 10:00:01 → 10:00:22 | sample: [pid 2481, 3102, 3891]"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -24,12 +26,12 @@ raw:        "Failed password for invalid user admin from 203.0.113.42 port 51234
             "Failed password for invalid user admin from 198.51.100.7 port 60012 ssh2"
             ... (윈도우 내 47회)
 
-[1] 치환:   "Failed password for invalid user admin from <IP> port <NUM> ssh2"
+[1] 치환:   "Failed password for invalid user admin from <IP4> port <NUM> ssh2"
 
 [3] 집계:   { count: 47, first_ts: 10:00:01, last_ts: 10:00:28,
               sample_raws: ["...203.0.113.42...", "...10.0.0.99...", "...198.51.100.7..."] }
 
-[4] flush:  "Failed password for invalid user admin from <IP> port <NUM> ssh2
+[4] flush:  "Failed password for invalid user admin from <IP4> port <NUM> ssh2
              × 47회 | 10:00:01 → 10:00:28 | sample: [203.0.113.42, 10.0.0.99, 198.51.100.7]"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -37,7 +39,8 @@ raw:        "Failed password for invalid user admin from 203.0.113.42 port 51234
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 raw:        "2026-05-07T10:01:33Z 502 GET /api/v2/users 0.843s upstream=app-03"
 
-[1] 치환:   "<TIMESTAMP> <NUM> GET <PATH> <NUM>s upstream=<WORD>-<NUM>"
+[1] 치환:   "<NUM>-<NUM>-<NUM>T<NUM>:<NUM>:<NUM>Z <NUM> GET <PATH> <NUM>.<NUM>s upstream=app-<NUM>"
+            ↑ 전용 타임스탬프 토큰 없음 — ISO 시각은 <NUM> 조각으로 분해, 'app'은 원문 유지
 
 [3] 집계:   { count: 1, first_ts: 10:01:33, last_ts: 10:01:33,
               sample_raws: ["2026-05-07T10:01:33Z 502 GET /api/v2/users ..."] }
@@ -53,12 +56,13 @@ raw:        "blk_update_request: I/O error, dev sdb, sector 4096000"
             "blk_update_request: I/O error, dev sdb, sector 4097024"
             ... (윈도우 내 312회)
 
-[1] 치환:   "blk_update_request: I/O error, dev <WORD>, sector <NUM>"
+[1] 치환:   "blk_update_request: I/O error, dev <DEV>, sector <NUM>"
+            ↑ 블록 디바이스명(sdb·nvme0n1 등)은 <DEV> 전용 마스크
 
 [3] 집계:   { count: 312, first_ts: 10:03:00, last_ts: 10:03:29,
               sample_raws: ["...sector 4096000", "...sector 4096512", "...sector 4097024"] }
 
-[4] flush:  "blk_update_request: I/O error, dev <WORD>, sector <NUM>
+[4] flush:  "blk_update_request: I/O error, dev <DEV>, sector <NUM>
              × 312회 | 10:03:00 → 10:03:29 | sample: [sector 4096000, 4096512, 4097024]"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -67,13 +71,13 @@ raw:        "blk_update_request: I/O error, dev sdb, sector 4096000"
 raw:        "TxError: rollback on tx=550e8400-e29b-41d4-a716-446655440000 table=orders"
             "TxError: rollback on tx=f47ac10b-58cc-4372-a567-0e02b2c3d479 table=orders"
 
-[1] 치환:   "TxError: rollback on tx=<UUID> table=<WORD>"
+[1] 치환:   "TxError: rollback on tx=<UUID> table=orders"
             ↑ UUID 치환으로 서로 다른 트랜잭션이 같은 fingerprint로 묶임
 
 [3] 집계:   { count: 18, first_ts: 10:05:10, last_ts: 10:05:38,
               sample_raws: ["...550e8400...", "...f47ac10b...", ...] }
 
-[4] flush:  "TxError: rollback on tx=<UUID> table=<WORD>
+[4] flush:  "TxError: rollback on tx=<UUID> table=orders
              × 18회 | 10:05:10 → 10:05:38"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -107,11 +111,17 @@ raw (host=db-02): "Connection pool exhausted: max=100 active=100 idle=0"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 치환 규칙 및 적용 순서
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-순서  토큰          패턴 예시                           이유
-  1   <UUID>        550e8400-e29b-41d4-a716-...        내부 숫자가 <NUM>으로 먼저 깨지는 것 방지
-  2   <IP>          203.0.113.42 / ::1                 숫자 치환 전에 확정
-  3   <TIMESTAMP>   2026-05-07T10:01:33Z               ISO 8601, 숫자 포함
-  4   <PATH>        /var/log/app.log                   슬래시 포함 식별자
-  5   <HEX>         0x7fff4a2b                         순수 숫자보다 먼저
-  6   <NUM>         2481, 100, 0.843                   나머지 숫자 전부
-  7   <WORD>        app-03, sdb, java                  영숫자+기호 혼합 식별자 (가장 느슨)
+순서  토큰            패턴 예시                          이유
+  1   <UUID>          550e8400-e29b-41d4-a716-...       내부 숫자가 <NUM>으로 먼저 깨지는 것 방지
+  2   <IP4>           203.0.113.42                      숫자 치환 전에 확정
+  3   <IP6>           fe80::a00:27ff:fe4e:66a1          콜론 hex — MAC(<HEX>)보다 먼저
+  4   SHA256:<FPR>    SHA256:Xk3j9d…(base64 20자+)      SSH 키 지문 — 키마다 달라 fingerprint 폭증 방지
+  5   [<ADDR>]        [<ffffffff8100abcd>]              커널 스택 주소 (0x 없는 소문자 hex 8–16)
+  6   <CID>           docker-3f2a…64hex….scope          컨테이너 ID (VETH·BR·MNT도 같은 취지의 도커 ID 마스크)
+  7   <HEX>           aa:bb:cc:dd:ee:ff / 0x7fff4a2b    MAC 주소·0x 접두 16진수
+  8   <PATH>          /var/log/app.log                  슬래시 2개 이상 경로
+  9   <DEV>           sdb1, nvme0n1p2, loop0            블록 디바이스명
+ 10   <NUM>           2481, 100                         나머지 숫자 전부 (가장 마지막)
+
+※ <TIMESTAMP>·<WORD> 토큰은 없다 — ISO 시각은 <NUM> 조각으로 분해되고,
+  일반 단어(java·admin·유닛명·테이블명)는 원문 그대로 남는다 (정본: src/normalize/tokens.rs)
